@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rlearn</title>
+  <script type="module" src="/src/main.js"></script>
+</head>
+<body>
+  <aside id="sidebar">
+    <header class="brand">
+      <span class="logo" title="rlearn">L</span>
+      <button id="collapse" class="icon" data-icon="sidebar" title="Hide sidebar"></button>
+    </header>
+    <nav class="tabs">
+      <button class="icon tab active" data-tab="files" data-icon="folder" title="Files"></button>
+      <button class="icon tab" data-tab="search" data-icon="search" title="Search"></button>
+      <button class="icon tab" data-tab="bookmarks" data-icon="bookmark" title="Bookmarks"></button>
+      <span class="spacer"></span>
+      <button id="new-lesson" class="icon files-only" data-icon="filePlus" title="New lesson"></button>
+      <button id="new-folder" class="icon files-only" data-icon="folderPlus" title="New folder"></button>
+    </nav>
+
+    <section id="files" class="panel">
+      <div id="tree" role="tree"></div>
+    </section>
+    <section id="search" class="panel" hidden>
+      <input id="search-input" type="search" aria-label="Search lessons" spellcheck="false">
+      <div id="results" class="list"></div>
+    </section>
+    <section id="bookmarks" class="panel" hidden>
+      <div id="marks" class="list"></div>
+    </section>
+
+    <button id="model" class="model" title="Model"><span data-icon="spark"></span><span id="who"></span></button>
+  </aside>
+  <button id="expand" class="icon floating" data-icon="sidebar" title="Show sidebar"></button>
+
+  <main id="start">
+    <form id="start-form">
+      <div id="crumb" class="crumb"></div>
+      <h1>What do you want to learn?</h1>
+      <div class="start-box">
+        <textarea id="start-input" rows="3" aria-label="What do you want to learn?"></textarea>
+        <div class="start-foot">
+          <div id="materials" class="chips"></div>
+          <button type="button" id="attach" class="icon" data-icon="clip" title="Add material: PDF, transcript, notes"></button>
+          <button id="start-btn" class="primary">Start</button>
+        </div>
+      </div>
+    </form>
+  </main>
+
+  <main id="lesson" hidden>
+    <section id="canvas" aria-label="Lesson">
+      <header class="canvas-head">
+        <h1 id="title"></h1>
+        <div id="lesson-materials" class="chips"></div>
+      </header>
+      <article id="canvas-body"></article>
+    </section>
+    <aside id="chat" aria-label="Chat">
+      <div id="log" aria-live="polite"></div>
+      <form id="composer">
+        <textarea id="input" rows="1" aria-label="Message"></textarea>
+        <button class="send" data-icon="send" aria-label="Send"></button>
+      </form>
+    </aside>
+  </main>
+
+  <main id="doc" hidden>
+    <article>
+      <header class="canvas-head"><h1 id="doc-title"></h1><span id="doc-words" class="muted"></span></header>
+      <div id="doc-body"></div>
+    </article>
+  </main>
+
+  <div id="menu" role="menu" hidden></div>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <header>
+        <h2>Model</h2>
+        <button value="close" class="icon" data-icon="x" aria-label="Close"></button>
+      </header>
+      <div id="p-list" class="segmented" role="radiogroup" aria-label="Provider"></div>
+      <label>Model <input id="p-model" spellcheck="false"></label>
+      <label id="p-base-row">URL <input id="p-base" spellcheck="false"></label>
+      <label id="p-key-row">Key <input id="p-key" type="password" autocomplete="off"></label>
+      <button value="save" class="primary wide">Save</button>
+    </form>
+  </dialog>
+</body>
+</html>
