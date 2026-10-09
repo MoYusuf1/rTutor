@@ -34,6 +34,40 @@ pub struct Reply {
     pub stop_details: Value,
     /// tool_use id -> raw input that wasn't valid JSON (sent back to the model as an error)
     pub invalid: Map<String, Value>,
+    pub usage: Usage,
+}
+
+/// What one turn cost, normalized across providers. `input` is the uncached part of the prompt.
+#[derive(Serialize, Default, Clone)]
+pub struct Usage {
+    pub model: String,
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    pub cost: Option<f64>,
+    pub subscription: bool,
+    pub limits: Value, // subscription windows (Claude Code: 5-hour and weekly), when the provider reports them
+    pub ms: u64,
+}
+
+pub(crate) fn n(v: &Value) -> u64 {
+    v.as_u64().unwrap_or(0)
+}
+
+/// Rough API prices, $ per million input / output tokens (cache reads 0.1x, cache writes 1.25x).
+fn price(model: &str) -> Option<(f64, f64)> {
+    const TABLE: [(&str, f64, f64); 8] = [
+        ("claude-fable-5", 10.0, 50.0), ("claude-mythos-5", 10.0, 50.0), ("claude-opus-5-5", 4.0, 20.0), ("claude-opus-5", 5.0, 25.0),
+        ("claude-opus-4", 5.0, 25.0), ("claude-sonnet-5", 2.0, 10.0), ("claude-sonnet-4-6", 3.0, 15.0), ("claude-haiku-4", 1.0, 5.0),
+    ];
+    TABLE.iter().find(|(prefix, ..)| model.starts_with(prefix)).map(|&(_, i, o)| (i, o))
+}
+
+pub(crate) fn api_cost(u: &Usage) -> Option<f64> {
+    let (i, o) = price(&u.model)?;
+    let input = u.input as f64 + u.cache_write as f64 * 1.25 + u.cache_read as f64 * 0.1;
+    Some((input * i + u.output as f64 * o) / 1e6)
 }
 
 /// The tools the app runs in the UI; the model only decides when to call them.
@@ -149,16 +183,19 @@ impl Acc {
     }
 }
 
+fn api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let msg = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().or(v["error"].as_str()).map(String::from))
+        .unwrap_or_else(|| body.to_owned());
+    format!("{} {}: {msg}", status.as_u16(), status.canonical_reason().unwrap_or(""))
+}
+
 /// Reads a server-sent-event stream, calling `on` with each `data:` payload. `on` returns true to stop.
 async fn sse(resp: reqwest::Response, mut on: impl FnMut(&str) -> Result<bool, String>) -> Result<(), String> {
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v["error"]["message"].as_str().or(v["error"].as_str()).map(String::from))
-            .unwrap_or(body);
-        return Err(format!("{} {}: {msg}", status.as_u16(), status.canonical_reason().unwrap_or("")));
+        return Err(api_error(status, &resp.text().await.unwrap_or_default()));
     }
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
@@ -233,10 +270,17 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
     }
     let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
 
-    sse(resp, |data| {
+    let streamed = sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
         let index = v["index"].as_u64().unwrap_or(0);
         match v["type"].as_str() {
+            Some("message_start") => {
+                let (m, u) = (&v["message"], &v["message"]["usage"]);
+                let usage = &mut acc.reply.usage;
+                usage.model = m["model"].as_str().unwrap_or(&p.model).to_owned();
+                (usage.input, usage.cache_read, usage.cache_write) =
+                    (n(&u["input_tokens"]), n(&u["cache_read_input_tokens"]), n(&u["cache_creation_input_tokens"]));
+            }
             Some("content_block_start") => acc.start(index, v["content_block"].clone(), ch),
             Some("content_block_delta") => {
                 let d = &v["delta"];
@@ -268,13 +312,18 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
                 if !v["delta"]["stop_details"].is_null() {
                     acc.reply.stop_details = v["delta"]["stop_details"].clone();
                 }
+                if let Some(out) = v["usage"]["output_tokens"].as_u64() {
+                    acc.reply.usage.output = out; // cumulative
+                }
             }
             Some("error") => return Err(v["error"]["message"].as_str().unwrap_or("stream error").to_owned()),
             _ => {}
         }
         Ok(false)
     })
-    .await
+    .await;
+    acc.reply.usage.cost = api_cost(&acc.reply.usage);
+    streamed
 }
 
 /// After a mid-output server-side fallback, blocks before the last `fallback` marker must not be echoed back
@@ -343,12 +392,24 @@ async fn openai(http: &reqwest::Client, p: &Provider, key: &str, system: &str, m
         .into_iter()
         .map(|t| json!({ "type": "function", "function": { "name": t["name"], "description": t["description"], "parameters": t["input_schema"] } }))
         .collect();
-    let body = json!({ "model": p.model, "stream": true, "messages": to_openai(system, messages), "tools": tools });
-    let mut req = http.post(format!("{}/chat/completions", p.base_url.trim_end_matches('/')));
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
+    let mut body = json!({ "model": p.model, "stream": true, "messages": to_openai(system, messages), "tools": tools,
+                           "stream_options": { "include_usage": true } });
+    let url = format!("{}/chat/completions", p.base_url.trim_end_matches('/'));
+    let send = |body: &Value| {
+        let req = http.post(&url).json(body);
+        if key.is_empty() { req } else { req.bearer_auth(key) }.send()
+    };
+    let mut resp = send(&body).await.map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        // some OpenAI-compatible servers reject the usage option; retry once without it
+        let text = resp.text().await.unwrap_or_default();
+        if !text.contains("stream_options") {
+            return Err(api_error(reqwest::StatusCode::BAD_REQUEST, &text));
+        }
+        body.as_object_mut().map(|o| o.remove("stream_options"));
+        resp = send(&body).await.map_err(|e| e.to_string())?;
     }
-    let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
+    acc.reply.usage.model = p.model.clone();
 
     sse(resp, |data| {
         if data == "[DONE]" {
@@ -357,6 +418,15 @@ async fn openai(http: &reqwest::Client, p: &Provider, key: &str, system: &str, m
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
         if let Some(msg) = v["error"]["message"].as_str() {
             return Err(msg.to_owned());
+        }
+        if let Some(u) = v["usage"].as_object() {
+            let cached = n(&u.get("prompt_tokens_details").map_or(Value::Null, |d| d["cached_tokens"].clone()));
+            let usage = &mut acc.reply.usage;
+            (usage.input, usage.cache_read, usage.output) =
+                (n(&u["prompt_tokens"]).saturating_sub(cached), cached, n(&u["completion_tokens"]));
+        }
+        if let Some(m) = v["model"].as_str() {
+            acc.reply.usage.model = m.to_owned();
         }
         let choice = &v["choices"][0];
         let d = &choice["delta"];

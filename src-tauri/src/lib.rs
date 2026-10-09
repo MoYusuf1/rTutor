@@ -3,7 +3,7 @@ mod db;
 mod llm;
 
 use db::{err, exec, Res};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tauri::{ipc::Channel, Manager, State};
@@ -117,13 +117,20 @@ async fn send(
         (o.messages.clone(), o.system.clone().unwrap_or_default()) // Arc clones: no copying
     };
 
+    let started = std::time::Instant::now();
     let mut reply = llm::chat(&store.http, &provider, &key, &system, &messages, &on_event).await?;
+    reply.usage.ms = started.elapsed().as_millis() as u64;
     drop(messages); // last other reference, so the push below appends in place
     if reply.stop_reason == "refusal" {
         reply.content.retain(|b| b["type"] != "tool_use"); // a refusal can cut a tool call off mid-input
     }
     let msg = json!({ "role": "assistant", "content": reply.content });
     let c = store.db()?;
+    db::record_turn(&c, lesson, &provider.id, &reply.usage)?;
+    if !reply.usage.limits.is_null() {
+        let key = format!("limits:{}", provider.id);
+        exec(&c, "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, reply.usage.limits.to_string()])?;
+    }
     let mut o = store.open.lock().map_err(err)?;
     if o.lesson == lesson {
         db::append_message(&c, lesson, o.messages.len(), &msg)?;
@@ -312,6 +319,22 @@ fn delete_source(store: State<Store>, id: i64) -> Res<()> {
     Ok(())
 }
 
+/// What the status strip shows: lesson totals, the latest turn, and the provider's last known limits.
+#[tauri::command]
+fn stats(store: State<Store>, lesson: Option<i64>, provider: String) -> Res<Value> {
+    let c = store.db()?;
+    let mut out = match lesson {
+        Some(id) => db::lesson_stats(&c, id)?,
+        None => json!({}),
+    };
+    let limits: Option<String> = c
+        .query_row("SELECT value FROM settings WHERE key = ?1", [format!("limits:{provider}")], |r| r.get(0))
+        .optional()
+        .map_err(err)?;
+    out["limits"] = limits.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+    Ok(out)
+}
+
 // ---------- settings ----------
 
 #[tauri::command]
@@ -337,7 +360,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
-            get_source, delete_source, get_settings, save_settings
+            get_source, delete_source, get_settings, save_settings, stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");

@@ -24,3 +24,9 @@ tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["macros", "rt"] }
+
+[profile.release]
+opt-level = "s"     # size over raw speed; the app's hot paths are network-bound
+lto = true
+codegen-units = 1
+strip = true        # panic stays "unwind": PDF import catches parser panics

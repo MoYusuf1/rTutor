@@ -3,8 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import "@fontsource-variable/inter";
-import "@fontsource-variable/source-serif-4";
+import mermaidUrl from "@mermaid-js/tiny/dist/mermaid.tiny.js?url";
 import "./style.css";
 
 marked.use({ breaks: true });
@@ -84,7 +83,14 @@ let mermaidLib;
 async function drawDiagrams(node) {
   const nodes = node.querySelectorAll(".mermaid");
   if (!nodes.length) return;
-  mermaidLib ??= (await import("mermaid")).default; // loaded only once a lesson has a diagram
+  if (!mermaidLib) {
+    // the tiny build (no heavy layout engines) is a classic script that sets globalThis.mermaid; load it on first diagram
+    await new Promise((resolve, reject) => {
+      const script = Object.assign(document.createElement("script"), { src: mermaidUrl, onload: resolve, onerror: reject });
+      document.head.append(script);
+    });
+    mermaidLib = globalThis.mermaid;
+  }
   {
     // read the palette on every draw so diagrams follow a light/dark switch
     const css = getComputedStyle(document.documentElement);
@@ -525,6 +531,7 @@ async function openLesson(id) {
   const last = l.messages.at(-1);
   lesson.last = last?.role === "assistant" ? last.content : null;
   renderTree();
+  renderMeter();
   if (pendingCalls().length) runLoop(); // closed in the middle of a quiz: ask it again
 }
 
@@ -676,6 +683,51 @@ async function runTool({ id, name, input = {} }) {
   return bad(`Unknown tool: ${name}`);
 }
 
+// ---------- status strip: what the provider reports about each turn ----------
+
+const fmt = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+// context window by model family; unknown models just show the size
+const windowOf = (m = "") => (/haiku/.test(m) ? 2e5 : /^claude-(opus|sonnet|fable|mythos)-[45]/.test(m) ? 1e6 : 0);
+
+function seg(label, value, frac, title) {
+  const s = el("span", "seg");
+  s.title = title ?? "";
+  s.append(label);
+  if (frac != null) {
+    const b = el("span", `bar${frac > 0.9 ? " full" : frac > 0.7 ? " warn" : ""}`);
+    const i = el("i");
+    i.style.width = `${Math.min(100, Math.round(frac * 100))}%`;
+    b.append(i);
+    s.append(b);
+  }
+  if (value) s.append(el("b", "", value));
+  return s;
+}
+
+async function renderMeter() {
+  const p = provider();
+  const s = await invoke("stats", { lesson: lesson?.id ?? null, provider: p.id }).catch(() => ({}));
+  const parts = [];
+  const last = s.last;
+  parts.push(seg(last?.model || p.model || p.label, ""));
+  for (const [key, label] of [["five_hour", "5h"], ["seven_day", "week"]]) {
+    const w = s.limits?.unifiedWindows?.[key];
+    if (!w) continue;
+    const reset = new Date(w.resetsAt * 1000);
+    const when = key === "five_hour" ? reset.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : reset.toLocaleDateString([], { weekday: "short", hour: "numeric" });
+    parts.push(seg(label, `${Math.round(w.utilization * 100)}%`, w.utilization, `Subscription usage, resets ${when}`));
+  }
+  if (last) {
+    const ctx = last.input + last.cache_read + last.cache_write;
+    const win = windowOf(last.model);
+    parts.push(seg("context", fmt(ctx), win ? ctx / win : null, win ? `${fmt(ctx)} of ${fmt(win)} tokens` : `${fmt(ctx)} tokens sent last turn`));
+    if (ctx) parts.push(seg("cached", `${Math.round((last.cache_read / ctx) * 100)}%`, null, "Share of last turn's prompt read from cache"));
+  }
+  const t = s.totals;
+  if (t?.turns && !p.local && t.cost != null) parts.push(seg("lesson", `$${t.cost.toFixed(t.cost < 1 ? 3 : 2)}`, null, `${t.turns} turns, ${fmt(t.input)} in, ${fmt(t.output)} out`));
+  $("#meter").replaceChildren(...parts);
+}
+
 // ---------- the tutor loop ----------
 
 function setBusy(on) {
@@ -700,6 +752,7 @@ async function runLoop(first) {
       }
       const { reply, live } = await streamTurn(content);
       lesson.last = reply.content;
+      renderMeter();
       turn = { live, invalid: reply.invalid, truncated: reply.stop_reason === "max_tokens" };
       if (reply.stop_reason === "refusal") {
         note(`The model declined to continue${reply.stop_details?.category ? ` (${reply.stop_details.category})` : ""}. Try rephrasing.`);
@@ -775,6 +828,7 @@ $("#settings").addEventListener("close", async () => {
     alert(e);
   }
   showWho();
+  if (lesson) renderMeter();
 });
 $("#model").onclick = openModel;
 
@@ -812,6 +866,7 @@ $("#start-form").onsubmit = async (e) => {
   await refresh();
   lesson = { id, title, folder: target, sections: 0, last: null };
   showLesson();
+  renderMeter();
   say(first, "user");
   runLoop(first);
 };

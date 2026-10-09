@@ -3,7 +3,7 @@
 //! <lesson>, <quiz> and <ask> blocks, and `Actions` turns them into the same tool_use blocks the API
 //! providers produce, while the text streams in. Everything downstream stays provider-agnostic.
 
-use crate::llm::{Acc, Event, Provider};
+use crate::llm::{n, Acc, Event, Provider};
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -254,13 +254,36 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if claude {
             let e = &v["event"];
-            if v["type"] == "stream_event" && e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" {
-                actions.feed(e["delta"]["text"].as_str().unwrap_or_default(), acc, ch);
-            } else if v["type"] == "result" && v["is_error"] == true {
-                failure = Some(v["result"].as_str().unwrap_or("Claude Code failed.").to_owned());
+            let usage = &mut acc.reply.usage;
+            match v["type"].as_str() {
+                Some("stream_event") if e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" => {
+                    actions.feed(e["delta"]["text"].as_str().unwrap_or_default(), acc, ch)
+                }
+                Some("system") if v["subtype"] == "init" => {
+                    usage.model = v["model"].as_str().unwrap_or_default().to_owned();
+                    usage.subscription = v["apiKeySource"] == "none"; // signed-in subscription, not an API key
+                }
+                Some("rate_limit_event") => usage.limits = v["rate_limit_info"].clone(),
+                Some("result") => {
+                    let u = &v["usage"];
+                    (usage.input, usage.cache_read, usage.cache_write, usage.output) =
+                        (n(&u["input_tokens"]), n(&u["cache_read_input_tokens"]), n(&u["cache_creation_input_tokens"]), n(&u["output_tokens"]));
+                    usage.cost = v["total_cost_usd"].as_f64(); // what the turn would cost at API prices
+                    if v["is_error"] == true {
+                        failure = Some(v["result"].as_str().unwrap_or("Claude Code failed.").to_owned());
+                    }
+                }
+                _ => {}
             }
         } else if v["type"] == "item.completed" && v["item"]["type"] == "agent_message" {
             actions.feed(&format!("{}\n", v["item"]["text"].as_str().unwrap_or_default()), acc, ch);
+        } else if v["type"] == "turn.completed" {
+            let u = &v["usage"]; // Codex counts cached tokens inside input_tokens
+            let usage = &mut acc.reply.usage;
+            (usage.input, usage.cache_read, usage.output) =
+                (n(&u["input_tokens"]).saturating_sub(n(&u["cached_input_tokens"])), n(&u["cached_input_tokens"]), n(&u["output_tokens"]));
+            usage.model = if p.model.is_empty() { "Codex default".into() } else { p.model.clone() };
+            usage.subscription = true;
         } else if v["type"] == "turn.failed" || v["type"] == "error" {
             let msg = v["error"]["message"].as_str().or(v["message"].as_str()).unwrap_or("Codex failed.");
             failure = Some(msg.to_owned());
@@ -354,7 +377,7 @@ mod live {
         let msgs = vec![json!({ "role": "user", "content": "Test of the format: write a <lesson> block whose markdown is just `# Hello`, then a <quiz> asking what 1+1 is with options 1 and 2." })];
         run(&p, "You are a tutor.", &msgs, &ch, &mut acc).await.unwrap();
         acc.finish(&ch);
-        println!("{}", serde_json::to_string_pretty(&acc.reply.content).unwrap());
+        println!("{}", serde_json::to_string_pretty(&json!({ "content": acc.reply.content, "usage": acc.reply.usage })).unwrap());
         assert!(acc.reply.content.iter().any(|b| b["name"] == "quiz"));
     }
 }

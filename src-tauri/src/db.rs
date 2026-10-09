@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS sources (
   id INTEGER PRIMARY KEY, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
   lesson_id INTEGER REFERENCES lessons(id) ON DELETE CASCADE, name TEXT NOT NULL, body TEXT NOT NULL, words INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS turns (
+  id INTEGER PRIMARY KEY, lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL, model TEXT NOT NULL, input INTEGER NOT NULL, cache_read INTEGER NOT NULL,
+  cache_write INTEGER NOT NULL, output INTEGER NOT NULL, cost REAL, ms INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS turns_by_lesson ON turns(lesson_id, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(markdown, content='sections', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS sections_ai AFTER INSERT ON sections BEGIN
   INSERT INTO sections_fts(rowid, markdown) VALUES (new.id, new.markdown); END;
@@ -43,7 +48,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
 fn migrate(c: &Connection) -> rusqlite::Result<()> {
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version >= 2 {
-        return Ok(());
+        return c.execute_batch(SCHEMA); // idempotent: adds tables introduced since (e.g. turns)
     }
     // version 1 kept each lesson as one JSON blob; carry those lessons over
     let v1 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = 'data'", [], |r| r.get::<_, i64>(0))? > 0;
@@ -152,6 +157,38 @@ pub fn is_within(c: &Connection, target: i64, folder: i64) -> Res<bool> {
     .map_err(err)
 }
 
+pub fn record_turn(c: &Connection, lesson: i64, provider: &str, u: &crate::llm::Usage) -> Res<()> {
+    exec(
+        c,
+        "INSERT INTO turns (lesson_id, provider, model, input, cache_read, cache_write, output, cost, ms, at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![lesson, provider, u.model, u.input as i64, u.cache_read as i64, u.cache_write as i64, u.output as i64, u.cost, u.ms as i64, now()],
+    )
+    .map(drop)
+}
+
+/// Totals for a lesson plus its latest turn (the current context size and cache hit rate).
+pub fn lesson_stats(c: &Connection, lesson: i64) -> Res<Value> {
+    let totals = c
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(input + cache_read + cache_write), 0), COALESCE(SUM(output), 0), SUM(cost)
+             FROM turns WHERE lesson_id = ?1",
+            [lesson],
+            |r| Ok(json!({ "turns": r.get::<_, i64>(0)?, "input": r.get::<_, i64>(1)?, "output": r.get::<_, i64>(2)?, "cost": r.get::<_, Option<f64>>(3)? })),
+        )
+        .map_err(err)?;
+    let last = c
+        .query_row(
+            "SELECT provider, model, input, cache_read, cache_write, output FROM turns WHERE lesson_id = ?1 ORDER BY id DESC LIMIT 1",
+            [lesson],
+            |r| Ok(json!({ "provider": r.get::<_, String>(0)?, "model": r.get::<_, String>(1)?, "input": r.get::<_, i64>(2)?,
+                           "cache_read": r.get::<_, i64>(3)?, "cache_write": r.get::<_, i64>(4)?, "output": r.get::<_, i64>(5)? })),
+        )
+        .optional()
+        .map_err(err)?;
+    Ok(json!({ "totals": totals, "last": last }))
+}
+
 pub fn lesson(c: &Connection, id: i64) -> Res<Value> {
     let (title, folder): (String, Option<i64>) = c
         .query_row("SELECT title, folder_id FROM lessons WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -236,6 +273,19 @@ mod tests {
         c.execute_batch("INSERT INTO folders (id, parent_id, name) VALUES (1, NULL, 'a'), (2, 1, 'b'), (3, 2, 'c'), (4, NULL, 'd');").unwrap();
         assert!(is_within(&c, 3, 1).unwrap() && is_within(&c, 1, 1).unwrap());
         assert!(!is_within(&c, 4, 1).unwrap() && !is_within(&c, 1, 3).unwrap());
+    }
+
+    #[test]
+    fn turns_add_up_per_lesson() {
+        let c = mem();
+        c.execute_batch("INSERT INTO lessons (id, title, updated) VALUES (1, 'L', 0);").unwrap();
+        let mut u = crate::llm::Usage { model: "m".into(), input: 100, cache_read: 900, output: 50, cost: Some(0.01), ..Default::default() };
+        record_turn(&c, 1, "claude-code", &u).unwrap();
+        u.cost = None;
+        record_turn(&c, 1, "claude-code", &u).unwrap();
+        let s = lesson_stats(&c, 1).unwrap();
+        assert_eq!((s["totals"]["turns"].as_i64(), s["totals"]["input"].as_i64(), s["totals"]["cost"].as_f64()), (Some(2), Some(2000), Some(0.01)));
+        assert_eq!(s["last"]["cache_read"], 900);
     }
 
     #[test]
