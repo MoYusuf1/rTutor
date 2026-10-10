@@ -35,6 +35,7 @@ const PATHS = {
   x: "M6 6l12 12M18 6L6 18",
   send: "M12 19V5M5.5 11.5L12 5l6.5 6.5",
   spark: "M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6z",
+  terminal: "M4 5h16v14H4zM7.5 9.5l3 2.5-3 2.5M12.5 15h4",
 };
 const icon = (name, size = 16) =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${PATHS[name]}"/></svg>`;
@@ -551,6 +552,7 @@ async function streamTurn(content) {
 
   const ch = new Channel();
   ch.onmessage = (e) => {
+    if (e.type === "log") return agentLog(e.text); // behind-the-scenes lines go to the Agent panel only
     typing.remove();
     if (e.type === "start") {
       const b = e.block;
@@ -778,12 +780,112 @@ async function runLoop(first) {
       content = reply.stop_reason === "pause_turn" ? null : undefined; // null resumes a paused web search
     }
   } catch (e) {
+    agentLog(`error  ${e}`);
     note(`Something went wrong: ${e}`);
   } finally {
     setBusy(false);
     refresh();
   }
 }
+
+// ---------- bottom panel: agent log and terminal ----------
+
+const drawer = $("#drawer");
+
+function setDrawer(open) {
+  drawer.hidden = !open;
+  document.body.classList.toggle("drawer-open", open);
+  if (open && !$("#shell").hidden) openShell();
+}
+
+function showPane(name) {
+  for (const b of document.querySelectorAll(".dtab")) b.classList.toggle("active", b.dataset.pane === name);
+  $("#agent-log").hidden = name !== "agent";
+  $("#shell").hidden = name !== "shell";
+  store.set("learn.pane", name);
+  if (name === "shell" && !drawer.hidden) openShell();
+}
+
+const MAX_LOG = 1500; // older lines drop off so a long session can't grow memory without bound
+function agentLog(text) {
+  const box = $("#agent-log");
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const line = el("div", /^(stderr|error)|"is_error":true|failed/i.test(text) ? "err" : text.startsWith("done") ? "done" : "");
+  line.append(el("span", "t", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })), text);
+  box.append(line);
+  while (box.childElementCount > MAX_LOG) box.firstElementChild.remove();
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+
+let shell = null; // { term, fit }: one xterm for the app's lifetime, so scrollback survives hiding the panel
+
+async function startPty() {
+  const out = new Channel();
+  out.onmessage = (data) => shell.term.write(data);
+  await invoke("term_open", { cols: shell.term.cols, rows: shell.term.rows, out }).catch((e) => shell.term.write(`\r\n${e}\r\n`));
+}
+
+async function openShell() {
+  if (shell) {
+    requestAnimationFrame(fitShell);
+    return shell.term.focus();
+  }
+  // loaded the first time the terminal opens, not at startup
+  const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/xterm/css/xterm.css")]);
+  const css = getComputedStyle(document.documentElement);
+  const v = (name) => css.getPropertyValue(name).trim();
+  const term = new Terminal({
+    fontFamily: 'ui-monospace, "JetBrains Mono", monospace', fontSize: 13, cursorBlink: true, scrollback: 5000,
+    theme: { background: v("--sidebar"), foreground: v("--text"), cursor: v("--accent"), selectionBackground: v("--accent-soft") },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open($("#shell"));
+  fit.fit();
+  shell = { term, fit };
+  term.onData((data) =>
+    invoke("term_write", { data }).catch(async () => {
+      await startPty(); // the shell exited: any key starts a new one
+    }),
+  );
+  new ResizeObserver(fitShell).observe($("#shell"));
+  await startPty();
+  term.focus();
+}
+
+function fitShell() {
+  if (!shell || $("#shell").hidden || drawer.hidden) return;
+  shell.fit.fit();
+  invoke("term_resize", { cols: shell.term.cols, rows: shell.term.rows }).catch(() => {});
+}
+
+$("#term-btn").onclick = () => setDrawer(drawer.hidden);
+$("#drawer-close").onclick = () => setDrawer(false);
+for (const b of document.querySelectorAll(".dtab")) b.onclick = () => showPane(b.dataset.pane);
+addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.key === "`") {
+    e.preventDefault();
+    setDrawer(drawer.hidden);
+  }
+});
+$("#drawer-grip").onpointerdown = (e) => {
+  e.preventDefault();
+  const move = (m) => {
+    const h = Math.min(innerHeight - 160, Math.max(140, innerHeight - m.clientY));
+    document.documentElement.style.setProperty("--drawer-h", `${h}px`);
+    fitShell();
+  };
+  const up = () => {
+    removeEventListener("pointermove", move);
+    removeEventListener("pointerup", up);
+    store.set("learn.drawerH", getComputedStyle(document.documentElement).getPropertyValue("--drawer-h"));
+  };
+  addEventListener("pointermove", move);
+  addEventListener("pointerup", up);
+};
+const savedH = store.get("learn.drawerH", null);
+if (savedH) document.documentElement.style.setProperty("--drawer-h", savedH);
+showPane(store.get("learn.pane", "agent"));
 
 // ---------- model ----------
 

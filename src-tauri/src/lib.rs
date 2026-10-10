@@ -1,6 +1,7 @@
 mod cli;
 mod db;
 mod llm;
+mod pty;
 
 use db::{err, exec, Res};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -186,6 +187,11 @@ async fn send(
     let started = std::time::Instant::now();
     let mut reply = llm::chat(&store.http, &provider, &key, &system, &messages[from..], &on_event).await?;
     reply.usage.ms = started.elapsed().as_millis() as u64;
+    let u = &reply.usage;
+    llm::log(&on_event, format!(
+        "done  {}  {} in + {} cached / {} out  {:.1}s  stop={}",
+        u.model, u.input + u.cache_write, u.cache_read, u.output, u.ms as f64 / 1000.0, reply.stop_reason
+    ));
     drop(messages); // last other reference, so the push below appends in place
     if reply.stop_reason == "refusal" {
         reply.content.retain(|b| b["type"] != "tool_use"); // a refusal can cut a tool call off mid-input
@@ -422,6 +428,7 @@ fn save_settings(store: State<Store>, settings: Value) -> Res<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(pty::Term::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -431,7 +438,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
-            get_source, delete_source, get_settings, save_settings, stats, set_state
+            get_source, delete_source, get_settings, save_settings, stats, set_state,
+            pty::term_open, pty::term_write, pty::term_resize
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");

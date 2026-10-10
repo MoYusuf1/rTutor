@@ -25,6 +25,12 @@ pub enum Event {
     Start { index: usize, block: Value },
     Delta { index: usize, text: String },
     Stop { index: usize },
+    /// A line for the Agent panel: what the provider is doing behind the scenes.
+    Log { text: String },
+}
+
+pub(crate) fn log(ch: &Channel<Event>, text: impl Into<String>) {
+    let _ = ch.send(Event::Log { text: text.into() });
 }
 
 #[derive(Serialize, Default)]
@@ -290,7 +296,9 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
     if !betas.is_empty() {
         req = req.header("anthropic-beta", betas.join(","));
     }
+    log(ch, format!("POST {base}/v1/messages  model={}  messages={}", p.model, messages.len()));
     let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
+    log(ch, format!("HTTP {}", resp.status()));
 
     let streamed = sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
@@ -428,7 +436,9 @@ async fn openai(http: &reqwest::Client, p: &Provider, key: &str, system: &str, m
         let req = http.post(&url).json(body);
         if key.is_empty() { req } else { req.bearer_auth(key) }.send()
     };
+    log(ch, format!("POST {url}  model={}  messages={}", p.model, messages.len()));
     let mut resp = send(&body).await.map_err(|e| e.to_string())?;
+    log(ch, format!("HTTP {}", resp.status()));
     if resp.status() == reqwest::StatusCode::BAD_REQUEST {
         // some OpenAI-compatible servers reject the usage option; retry once without it
         let text = resp.text().await.unwrap_or_default();

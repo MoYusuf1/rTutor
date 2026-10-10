@@ -3,10 +3,10 @@
 //! <lesson>, <quiz> and <ask> blocks, and `Actions` turns them into the same tool_use blocks the API
 //! providers produce, while the text streams in. Everything downstream stays provider-agnostic.
 
-use crate::llm::{n, Acc, Event, Provider};
+use crate::llm::{log, n, Acc, Event, Provider};
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 const PROTOCOL: &str = "\n\n# How actions work in this session (overrides the tool descriptions above)
@@ -246,18 +246,32 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
     let writer = tokio::spawn(async move {
         let _ = stdin.write_all(input.as_bytes()).await; // dropped afterwards, which closes stdin
     });
-    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    // stderr goes to the Agent panel line by line as it arrives, and the tail is kept for error messages
+    let stderr = child.stderr.take().ok_or("no stderr")?;
+    let err_ch = ch.clone();
     let errors = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        s
+        let (mut lines, mut all) = (BufReader::new(stderr).lines(), String::new());
+        while let Ok(Some(line)) = lines.next_line().await {
+            log(&err_ch, format!("stderr  {line}"));
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
     });
+    log(ch, format!("{} {}", if claude { "claude -p" } else { "codex exec" }, if p.model.is_empty() { "(default model)".into() } else { format!("--model {}", p.model) }));
 
     let mut actions = Actions::default();
     let mut failure: Option<String> = None;
     let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            log(ch, line);
+            continue;
+        };
+        // everything except per-token text updates, which would flood the panel
+        if v["type"] != "stream_event" || v["event"]["type"] != "content_block_delta" {
+            log(ch, if line.len() > 600 { format!("{}…", &line[..line.floor_char_boundary(600)]) } else { line.clone() });
+        }
         if claude {
             let e = &v["event"];
             let usage = &mut acc.reply.usage;
