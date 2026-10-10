@@ -88,6 +88,9 @@ pub fn tools() -> Vec<Value> {
                 "correct_index": { "type": "integer", "description": "0-based index of the correct option" },
                 "explanation": { "type": "string", "description": "Why the correct option is right and what the tempting wrong ones get wrong. Shown only after the learner answers." }
             })) }),
+        json!({ "name": "update_state",
+            "description": "Replace your lesson state: a short Markdown note (under ~300 words) of what the learner reliably knows, their misconceptions and recent misses, the plan's nodes with status, and the next step. Call it after the plan is agreed and after every node's quiz-check. It is what you (or another tutor model) will rely on when older turns are summarized away, so keep it accurate and complete.",
+            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
         json!({ "name": "ask",
             "description": "Ask an ungraded multiple-choice question in the chat pane (goals, preferences, what to do next). The learner can also type their own answer.",
             "input_schema": obj(json!({ "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } })) }),
@@ -150,6 +153,7 @@ impl Acc {
         let b = &mut self.reply.content[index];
         let field = match b["type"].as_str() {
             Some("text") | Some("reasoning") => "text",
+            Some("compaction") => "content",
             Some("thinking") => "thinking",
             Some("tool_use") | Some("server_tool_use") => "input",
             _ => "",
@@ -220,6 +224,15 @@ fn starts(model: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| model.starts_with(p))
 }
 
+const COMPACTION: &str = "Summarize this tutoring session for the tutor who continues it. First copy the tutor's most recent \
+lesson state (the latest update_state call) word for word. Then add what happened after it: nodes taught, quiz results and the \
+learner's notes, open questions, and exactly where the lesson stopped. Keep it factual and specific; it replaces the turns above.";
+
+fn compacts(model: &str) -> bool {
+    starts(model, &["claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+                    "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5"])
+}
+
 async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str, messages: &[Value], ch: &Channel<Event>, acc: &mut Acc) -> Result<(), String> {
     let modern = starts(&p.model, &["claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-mythos-5"]);
     let fallbacks = starts(&p.model, &["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-mythos-5-1"]);
@@ -263,10 +276,19 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
         .post(format!("{base}/v1/messages"))
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01");
+    let mut betas = vec![];
     if fallbacks {
         // on a safety decline the API retries on Anthropic's recommended model, inside the same stream
         body["fallbacks"] = json!("default");
-        req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
+        betas.push("server-side-fallback-2026-07-01");
+    }
+    if compacts(&p.model) {
+        // past 150k input tokens the API summarizes older turns itself; rlearn just keeps appending
+        body["context_management"] = json!({ "edits": [{ "type": "compact_20260112", "instructions": COMPACTION }] });
+        betas.push("compact-2026-01-12");
+    }
+    if !betas.is_empty() {
+        req = req.header("anthropic-beta", betas.join(","));
     }
     let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
 
@@ -293,6 +315,7 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
                             b["signature"] = d["signature"].clone();
                         }
                     }
+                    _ if d["content"].is_string() => acc.push(index, d["content"].as_str().unwrap_or_default(), ch), // compaction summary
                     Some("citations_delta") => {
                         if let Some(b) = acc.block(index) {
                             if !b["citations"].is_array() {
@@ -352,6 +375,7 @@ fn text_of(blocks: &[Value]) -> String {
 
 pub fn to_openai(system: &str, messages: &[Value]) -> Vec<Value> {
     let mut out = vec![json!({ "role": "system", "content": system })];
+    let mut calls_seen = std::collections::HashSet::new();
     for m in messages {
         let Some(blocks) = m["content"].as_array() else {
             out.push(json!({ "role": m["role"], "content": m["content"] }));
@@ -360,7 +384,11 @@ pub fn to_openai(system: &str, messages: &[Value]) -> Vec<Value> {
         if m["role"] == "user" {
             for b in blocks.iter().filter(|b| b["type"] == "tool_result") {
                 let content = b["content"].as_str().map(String::from).unwrap_or_else(|| b["content"].to_string());
-                out.push(json!({ "role": "tool", "tool_call_id": b["tool_use_id"], "content": content }));
+                if calls_seen.contains(b["tool_use_id"].as_str().unwrap_or_default()) {
+                    out.push(json!({ "role": "tool", "tool_call_id": b["tool_use_id"], "content": content }));
+                } else {
+                    out.push(json!({ "role": "user", "content": format!("[app] {content}") })); // its call was compacted away
+                }
             }
             let text = text_of(blocks);
             if !text.is_empty() {
@@ -368,6 +396,7 @@ pub fn to_openai(system: &str, messages: &[Value]) -> Vec<Value> {
             }
         } else {
             // thinking, web search and fallback blocks are Anthropic-only; text and tool calls carry over
+            calls_seen.extend(blocks.iter().filter(|b| b["type"] == "tool_use").filter_map(|b| b["id"].as_str().map(String::from)));
             let calls: Vec<Value> = blocks
                 .iter()
                 .filter(|b| b["type"] == "tool_use")
@@ -486,6 +515,12 @@ mod tests {
         assert_eq!(out[2]["content"], "Let's start."); // thinking dropped
         assert_eq!(out[2]["tool_calls"][0]["function"]["arguments"], r#"{"question":"Q?"}"#);
         assert_eq!(out[3], json!({ "role": "tool", "tool_call_id": "t1", "content": "chose a" }));
+    }
+
+    #[test]
+    fn tool_results_without_their_call_become_text() {
+        let history = vec![json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "gone", "content": "chose b" }] })];
+        assert_eq!(to_openai("S", &history)[1], json!({ "role": "user", "content": "[app] chose b" }));
     }
 
     #[test]

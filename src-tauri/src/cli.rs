@@ -25,7 +25,11 @@ markdown for the lesson canvas
 {\"question\": \"...\", \"options\": [\"...\", \"...\"]}
 </ask>
 
-<lesson> is write_lesson, <quiz> is quiz and <ask> is ask, with the same rules. Quiz and ask contents must be valid JSON. \
+<state>
+your lesson state, as Markdown
+</state>
+
+<lesson> is write_lesson, <quiz> is quiz, <ask> is ask and <state> is update_state, with the same rules. Quiz and ask contents must be valid JSON. \
 Text outside the blocks goes to the chat. A <quiz> or <ask> ends your turn: write nothing after it and wait, because the \
 next message tells you what the learner chose. No web search is available in this session.";
 
@@ -44,8 +48,9 @@ pub fn transcript(messages: &[Value]) -> String {
         for b in blocks {
             match (b["type"].as_str(), b["name"].as_str()) {
                 (Some("text"), _) => s += &format!("{}\n", b["text"].as_str().unwrap_or_default()),
-                (Some("tool_use"), Some("write_lesson")) => {
-                    s += &format!("<lesson>\n{}\n</lesson>\n", b["input"]["markdown"].as_str().unwrap_or_default().trim_end())
+                (Some("tool_use"), Some(name @ ("write_lesson" | "update_state"))) => {
+                    let tag = if name == "write_lesson" { "lesson" } else { "state" };
+                    s += &format!("<{tag}>\n{}\n</{tag}>\n", b["input"]["markdown"].as_str().unwrap_or_default().trim_end())
                 }
                 (Some("tool_use"), Some(name)) => s += &format!("<{name}>\n{}\n</{name}>\n", b["input"]),
                 (Some("tool_result"), _) => {
@@ -63,7 +68,7 @@ pub fn transcript(messages: &[Value]) -> String {
 enum Mode {
     #[default]
     Text,
-    Lesson(u64),
+    Markdown(u64, &'static str), // <lesson> / <state>: body streamed as a JSON string
     Json(u64, &'static str),
 }
 
@@ -117,6 +122,7 @@ impl Actions {
             Mode::Text => {
                 let name = match tag {
                     "<lesson>" => "write_lesson",
+                    "<state>" => "update_state",
                     "<quiz>" => "quiz",
                     "<ask>" => "ask",
                     _ => return self.say(&format!("{}\n", &line[emitted..]), acc, ch),
@@ -125,19 +131,19 @@ impl Actions {
                 let key = self.key();
                 let id = self.id();
                 acc.start(key, json!({ "type": "tool_use", "id": id, "name": name, "input": {} }), ch);
-                self.mode = if name == "write_lesson" {
+                self.mode = if name == "write_lesson" || name == "update_state" {
                     acc.push(key, "{\"markdown\":\"", ch); // streamed as a JSON string so the canvas fills in live
-                    Mode::Lesson(key)
+                    Mode::Markdown(key, if name == "write_lesson" { "</lesson>" } else { "</state>" })
                 } else {
                     Mode::Json(key, if name == "quiz" { "</quiz>" } else { "</ask>" })
                 };
             }
-            Mode::Lesson(key) if tag == "</lesson>" => {
+            Mode::Markdown(key, close) if tag == close => {
                 acc.push(key, "\"}", ch);
                 acc.stop(key, ch);
                 self.mode = Mode::Text;
             }
-            Mode::Lesson(key) => {
+            Mode::Markdown(key, _) => {
                 let escaped = serde_json::to_string(&format!("{line}\n")).unwrap_or_default();
                 acc.push(key, &escaped[1..escaped.len() - 1], ch);
             }
@@ -175,7 +181,7 @@ impl Actions {
             self.end_line(acc, ch);
         }
         match self.mode {
-            Mode::Lesson(key) => {
+            Mode::Markdown(key, _) => {
                 acc.push(key, "\"}", ch);
                 acc.stop(key, ch);
             }
@@ -339,6 +345,18 @@ mod tests {
         acc.finish(&ch);
         assert_eq!(acc.reply.invalid.len(), 1);
         assert_eq!(acc.reply.content[1]["input"]["markdown"], "half a lesson\n");
+    }
+
+    #[test]
+    fn state_blocks_become_update_state_calls() {
+        let ch: Channel<Event> = Channel::new(|_| Ok(()));
+        let mut acc = Acc::default();
+        let mut a = Actions::default();
+        a.feed("<state>\nKnows: plan reads the cloud\nNext: modules\n</state>\n", &mut acc, &ch);
+        a.finish(&mut acc, &ch);
+        acc.finish(&ch);
+        let b = &acc.reply.content[0];
+        assert_eq!((b["name"].as_str(), b["input"]["markdown"].as_str()), (Some("update_state"), Some("Knows: plan reads the cloud\nNext: modules\n")));
     }
 
     #[test]

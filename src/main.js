@@ -499,18 +499,24 @@ async function openSource(s) {
 
 const leadHeading = (markdown = "") => markdown.match(/^#{1,2}\s+(.+)$/m)?.[1].replace(/[*_`$]/g, "").trim().slice(0, 80);
 
+function showNotes(markdown) {
+  $("#notes").hidden = !markdown;
+  if (markdown) $("#notes-body").replaceChildren(md(markdown));
+}
+
 function showLesson() {
   show("lesson");
   $("#title").textContent = lesson.title;
   $("#canvas-body").replaceChildren();
   $("#canvas-body").classList.remove("titled");
   log().replaceChildren();
+  showNotes(lesson.state);
   $("#lesson-materials").replaceChildren(...materialsFor(lesson.folder, lesson.id).map((s) => chip(s.name, s.words)));
 }
 
 async function openLesson(id) {
   const l = await invoke("get_lesson", { id });
-  lesson = { id, title: l.title, folder: l.folder, sections: l.sections.length, last: null };
+  lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sections.length, last: null };
   target = l.folder;
   showLesson();
   for (const m of l.sections) {
@@ -560,6 +566,7 @@ async function streamTurn(content) {
         live.set(b.id, view.md);
       } else if (b.type === "server_tool_use") view.note = note("Searching the web…");
       else if (b.type === "fallback") note(`Continued on ${b.to?.model ?? "a fallback model"}.`);
+      else if (b.type === "compaction") note("Earlier turns summarized to save tokens.");
       views.set(e.index, view);
     } else if (e.type === "delta") {
       const v = views.get(e.index);
@@ -673,6 +680,13 @@ async function runTool({ id, name, input = {} }) {
     await addSection(resultCard(question, picked, options[c], right, text, explanation));
     return ok(`The learner chose "${picked}" (${right ? "correct" : `incorrect; correct answer: "${options[c]}"`}).${text ? ` Their note: ${text}` : ""} The result card with your explanation is already in the lesson, so don't repeat it.`);
   }
+  if (name === "update_state") {
+    if (typeof input.markdown !== "string") return bad("update_state needs a markdown string.");
+    await invoke("set_state", { lesson: lesson.id, markdown: input.markdown });
+    lesson.state = input.markdown;
+    showNotes(input.markdown);
+    return ok("Lesson state saved.");
+  }
   if (name === "ask") {
     if (typeof input.question !== "string" || !Array.isArray(input.options)) return bad("ask needs a question and options.");
     const { i, text } = await choiceCard("ask", input.question, input.options, { free: true });
@@ -704,11 +718,14 @@ function seg(label, value, frac, title) {
   return s;
 }
 
+let lastProvider = null; // who answered this lesson's latest turn
+
 async function renderMeter() {
   const p = provider();
   const s = await invoke("stats", { lesson: lesson?.id ?? null, provider: p.id }).catch(() => ({}));
   const parts = [];
   const last = s.last;
+  lastProvider = last?.provider ?? null;
   parts.push(seg(last?.model || p.model || p.label, ""));
   for (const [key, label] of [["five_hour", "5h"], ["seven_day", "week"]]) {
     const w = s.limits?.unifiedWindows?.[key];
@@ -864,7 +881,7 @@ $("#start-form").onsubmit = async (e) => {
   for (const p of pending) await invoke("add_source", { folder: null, lesson: id, name: p.name, text: p.text });
   pending = [];
   await refresh();
-  lesson = { id, title, folder: target, sections: 0, last: null };
+  lesson = { id, title, folder: target, state: "", sections: 0, last: null };
   showLesson();
   renderMeter();
   say(first, "user");
@@ -877,6 +894,7 @@ $("#composer").onsubmit = async (e) => {
   if (!(await ready())) return openModel();
   $("#input").value = "";
   grow($("#input"));
+  if (lastProvider && lastProvider !== settings.active) note(`Continued with ${provider().label}`); // handoff
   say(text, "user");
   runLoop(text);
 };

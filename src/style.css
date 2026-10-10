@@ -114,6 +114,10 @@ body:not(.collapsed) .floating { display: none; }
 #doc { flex: 1; }
 .canvas-head { max-width: 760px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 10px; }
 #title, #doc-title { font: 650 32px/1.2 var(--read); margin: 0; letter-spacing: -0.01em; }
+.notes { font: 13.5px/1.55 var(--ui); color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.notes summary { cursor: pointer; font-weight: 600; list-style: none; }
+.notes summary::before { content: "▸ "; } .notes[open] summary::before { content: "▾ "; }
+.notes .md { margin-top: 6px; color: var(--text); } .notes .md > :last-child { margin-bottom: 0; }
 #canvas-body, #doc-body { max-width: 760px; margin: 0 auto; font: 18px/1.7 var(--read); }
 #doc-body pre.plain { white-space: pre-wrap; font: inherit; margin: 24px 0; }
 #canvas-body > * { margin-top: 28px; animation: rise 0.25s ease; }

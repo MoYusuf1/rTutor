@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS folders (
   id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS lessons (
   id INTEGER PRIMARY KEY, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
-  title TEXT NOT NULL, bookmarked INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
+  title TEXT NOT NULL, bookmarked INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT '', compact_from INTEGER NOT NULL DEFAULT 0, compact_state TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS messages (
   lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE, seq INTEGER NOT NULL, body TEXT NOT NULL,
   PRIMARY KEY (lesson_id, seq)) WITHOUT ROWID;
@@ -48,7 +49,8 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
 fn migrate(c: &Connection) -> rusqlite::Result<()> {
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version >= 2 {
-        return c.execute_batch(SCHEMA); // idempotent: adds tables introduced since (e.g. turns)
+        c.execute_batch(SCHEMA)?; // idempotent: adds tables introduced since (e.g. turns)
+        return add_lesson_columns(c);
     }
     // version 1 kept each lesson as one JSON blob; carry those lessons over
     let v1 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = 'data'", [], |r| r.get::<_, i64>(0))? > 0;
@@ -78,6 +80,35 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     }
     tx.pragma_update(None, "user_version", 2)?;
     tx.commit()
+}
+
+/// Lesson-state columns, added in place to databases created before them.
+fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
+    for (col, decl) in [("state", "TEXT NOT NULL DEFAULT ''"), ("compact_from", "INTEGER NOT NULL DEFAULT 0"), ("compact_state", "TEXT NOT NULL DEFAULT ''")] {
+        let has: i64 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = ?1", [col], |r| r.get(0))?;
+        if has == 0 {
+            c.execute_batch(&format!("ALTER TABLE lessons ADD COLUMN {col} {decl};"))?;
+        }
+    }
+    Ok(())
+}
+
+/// The tutor's lesson state, and where (and with which state snapshot) the history was last cut.
+pub struct Compaction {
+    pub state: String,
+    pub from: usize,
+    pub snapshot: String,
+}
+
+pub fn compaction(c: &Connection, lesson: i64) -> Res<Compaction> {
+    c.query_row("SELECT state, compact_from, compact_state FROM lessons WHERE id = ?1", [lesson], |r| {
+        Ok(Compaction { state: r.get(0)?, from: r.get::<_, i64>(1)? as usize, snapshot: r.get(2)? })
+    })
+    .map_err(err)
+}
+
+pub fn last_provider(c: &Connection, lesson: i64) -> Res<Option<String>> {
+    c.query_row("SELECT provider FROM turns WHERE lesson_id = ?1 ORDER BY id DESC LIMIT 1", [lesson], |r| r.get(0)).optional().map_err(err)
 }
 
 pub fn now() -> i64 {
@@ -190,11 +221,11 @@ pub fn lesson_stats(c: &Connection, lesson: i64) -> Res<Value> {
 }
 
 pub fn lesson(c: &Connection, id: i64) -> Res<Value> {
-    let (title, folder): (String, Option<i64>) = c
-        .query_row("SELECT title, folder_id FROM lessons WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let (title, folder, state): (String, Option<i64>, String) = c
+        .query_row("SELECT title, folder_id, state FROM lessons WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .map_err(err)?;
     let sections = rows(c, "SELECT markdown FROM sections WHERE lesson_id = ?1 ORDER BY id", [id], |r| Ok(Value::String(r.get(0)?)))?;
-    Ok(json!({ "id": id, "title": title, "folder": folder, "sections": sections }))
+    Ok(json!({ "id": id, "title": title, "folder": folder, "state": state, "sections": sections }))
 }
 
 /// Lessons whose title or content matches; snippets mark hits with \u{1}…\u{2}.
@@ -286,6 +317,21 @@ mod tests {
         let s = lesson_stats(&c, 1).unwrap();
         assert_eq!((s["totals"]["turns"].as_i64(), s["totals"]["input"].as_i64(), s["totals"]["cost"].as_f64()), (Some(2), Some(2000), Some(0.01)));
         assert_eq!(s["last"]["cache_read"], 900);
+    }
+
+    #[test]
+    fn lesson_state_columns_are_added_to_older_databases() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(&SCHEMA.replace(
+            ",\n  state TEXT NOT NULL DEFAULT '', compact_from INTEGER NOT NULL DEFAULT 0, compact_state TEXT NOT NULL DEFAULT '')",
+            ")",
+        ))
+        .unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+        c.execute_batch("INSERT INTO lessons (id, title, updated) VALUES (1, 'Old', 0);").unwrap();
+        migrate(&c).unwrap();
+        let k = compaction(&c, 1).unwrap();
+        assert_eq!((k.state.as_str(), k.from), ("", 0));
     }
 
     #[test]

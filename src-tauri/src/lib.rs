@@ -22,7 +22,41 @@ struct Store {
 struct Open {
     lesson: i64,
     messages: Arc<Vec<Value>>,
+    lens: Vec<usize>, // serialized size of each message, for the compaction budget
     system: Option<Arc<str>>,
+}
+
+impl Open {
+    fn load(lesson: i64, messages: Vec<Value>) -> Self {
+        let lens = messages.iter().map(|m| m.to_string().len()).collect();
+        Open { lesson, messages: Arc::new(messages), lens, system: None }
+    }
+    fn push(&mut self, msg: Value) {
+        self.lens.push(msg.to_string().len());
+        Arc::make_mut(&mut self.messages).push(msg);
+    }
+}
+
+const HANDOFF: &str = "[rlearn: you are taking over this lesson from a different tutor model. Read your lesson state and the recent \
+turns, then continue exactly where it left off. Do not restart the probe or the plan.]";
+
+/// Where the history sent to non-Anthropic providers starts. It only moves forward, in steps, so the
+/// prompt prefix stays byte-identical (and cached) between cuts. Sizes are serialized characters.
+fn cut_point(messages: &[Value], lens: &[usize], from: usize) -> usize {
+    // ponytail: characters / 4 approximates tokens; swap in real token counts if cuts land badly
+    const ABOVE: usize = 60_000 * 4; // cut once the kept history passes ~60k tokens…
+    const KEEP: usize = 16_000 * 4; //  …back to the last ~16k tokens
+    if lens[from..].iter().sum::<usize>() <= ABOVE {
+        return from;
+    }
+    let (mut i, mut size) = (lens.len(), 0);
+    while i > from + 1 && size + lens[i - 1] <= KEEP {
+        i -= 1;
+        size += lens[i];
+    }
+    // the kept history has to start with one of the learner's turns
+    let user = |j: &usize| messages[*j]["role"] == "user";
+    (i..messages.len()).find(user).or_else(|| (from + 1..i).rev().find(user)).unwrap_or(from)
 }
 
 impl Store {
@@ -100,25 +134,57 @@ async fn send(
     on_event: Channel<llm::Event>,
 ) -> Res<llm::Reply> {
     let key = read_key(&provider.id)?;
-    let (messages, system) = {
+    let (messages, system, from) = {
         let c = store.db()?;
         let mut o = store.open.lock().map_err(err)?;
         if o.lesson != lesson {
-            *o = Open { lesson, messages: Arc::new(db::messages(&c, lesson)?), system: None };
+            *o = Open::load(lesson, db::messages(&c, lesson)?);
         }
-        if let Some(content) = content {
+        if let Some(mut content) = content {
+            // a different provider than last turn: tell it to continue, not start over
+            if db::last_provider(&c, lesson)?.is_some_and(|prev| prev != provider.id) {
+                content = match content {
+                    Value::String(t) => Value::String(format!("{t}\n\n{HANDOFF}")),
+                    Value::Array(mut blocks) => {
+                        blocks.push(json!({ "type": "text", "text": HANDOFF }));
+                        Value::Array(blocks)
+                    }
+                    other => other,
+                };
+            }
             let msg = json!({ "role": "user", "content": content });
             db::append_message(&c, lesson, o.messages.len(), &msg)?;
-            Arc::make_mut(&mut o.messages).push(msg);
+            o.push(msg);
         }
         if o.system.is_none() {
             o.system = Some(system_prompt(&c, lesson)?.into());
         }
-        (o.messages.clone(), o.system.clone().unwrap_or_default()) // Arc clones: no copying
+        // Anthropic summarizes long histories on its servers. For the others rlearn cuts old turns and puts the
+        // tutor's own lesson state in their place, which the database still has in full.
+        let mut k = db::compaction(&c, lesson)?;
+        if provider.kind != "anthropic" {
+            let cut = cut_point(&o.messages, &o.lens, k.from.min(o.messages.len().saturating_sub(1)));
+            if cut > k.from && !k.state.is_empty() {
+                (k.from, k.snapshot) = (cut, k.state.clone());
+                exec(&c, "UPDATE lessons SET compact_from = ?2, compact_state = ?3 WHERE id = ?1", params![lesson, cut as i64, k.snapshot])?;
+            }
+        }
+        let base = o.system.clone().unwrap_or_default();
+        let (from, system) = if provider.kind == "anthropic" || k.from == 0 {
+            (0, base)
+        } else {
+            let section = format!(
+                "\n\n# Lesson so far\n\nOlder turns of this lesson are left out to save tokens. This is your own lesson state from \
+                 when they were cut; every turn after that follows in full.\n\n{}\n",
+                k.snapshot
+            );
+            (k.from.min(o.messages.len()), Arc::from(format!("{base}{section}")))
+        };
+        (o.messages.clone(), system, from) // Arc clones: no copying
     };
 
     let started = std::time::Instant::now();
-    let mut reply = llm::chat(&store.http, &provider, &key, &system, &messages, &on_event).await?;
+    let mut reply = llm::chat(&store.http, &provider, &key, &system, &messages[from..], &on_event).await?;
     reply.usage.ms = started.elapsed().as_millis() as u64;
     drop(messages); // last other reference, so the push below appends in place
     if reply.stop_reason == "refusal" {
@@ -134,7 +200,7 @@ async fn send(
     let mut o = store.open.lock().map_err(err)?;
     if o.lesson == lesson {
         db::append_message(&c, lesson, o.messages.len(), &msg)?;
-        Arc::make_mut(&mut o.messages).push(msg);
+        o.push(msg);
     } else {
         db::append_message(&c, lesson, db::next_seq(&c, lesson)?, &msg)?; // learner switched lessons mid-turn
     }
@@ -152,9 +218,9 @@ fn tree(store: State<Store>) -> Res<Value> {
 fn get_lesson(store: State<Store>, id: i64) -> Res<Value> {
     let c = store.db()?;
     let mut lesson = db::lesson(&c, id)?;
-    let messages = Arc::new(db::messages(&c, id)?);
-    lesson["messages"] = json!(*messages);
-    *store.open.lock().map_err(err)? = Open { lesson: id, messages, system: None };
+    let open = Open::load(id, db::messages(&c, id)?);
+    lesson["messages"] = json!(*open.messages);
+    *store.open.lock().map_err(err)? = open;
     Ok(lesson)
 }
 
@@ -168,6 +234,11 @@ fn create_lesson(store: State<Store>, folder: Option<i64>, title: String) -> Res
 #[tauri::command]
 fn add_section(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
     exec(&*store.db()?, "INSERT INTO sections (lesson_id, markdown) VALUES (?1, ?2)", params![lesson, markdown]).map(drop)
+}
+
+#[tauri::command]
+fn set_state(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
+    exec(&*store.db()?, "UPDATE lessons SET state = ?2 WHERE id = ?1", params![lesson, markdown]).map(drop)
 }
 
 #[tauri::command]
@@ -360,7 +431,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
-            get_source, delete_source, get_settings, save_settings, stats
+            get_source, delete_source, get_settings, save_settings, stats, set_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");
@@ -369,6 +440,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::extract;
+
+    #[test]
+    fn history_is_cut_in_steps_at_a_learner_turn() {
+        use serde_json::json;
+        let roles = ["user", "assistant", "user", "assistant", "user", "assistant"];
+        let msgs: Vec<_> = roles.iter().map(|r| json!({ "role": r })).collect();
+        let small = vec![1000; 6];
+        assert_eq!(super::cut_point(&msgs, &small, 0), 0); // under budget: no cut
+        let big = vec![50_000 * 4; 6]; // each message alone is over the keep budget
+        let cut = super::cut_point(&msgs, &big, 0);
+        assert!(cut > 0 && msgs[cut]["role"] == "user");
+        assert!(super::cut_point(&msgs, &big, cut) >= cut); // never moves back
+        let tail = vec![10, 10, 10, 10, 70_000 * 4, 10];
+        assert_eq!(super::cut_point(&msgs, &tail, 0), 4); // keeps the latest turns that fit
+    }
 
     #[test]
     fn subtitles_keep_only_the_words() {
