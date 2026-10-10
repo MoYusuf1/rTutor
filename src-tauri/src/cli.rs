@@ -9,34 +9,20 @@ use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-const PROTOCOL: &str = "\n\n# How actions work in this session (overrides the tool descriptions above)
+const MCP_PROTOCOL: &str = "\n\n# Your tools in this session
 
-You can't call tools here. Instead, write each action straight into your reply as a tagged block, every tag on its own line:
+Your tools are write_lesson, quiz, ask and update_state (they appear as mcp__rlearn__…), with the rules above. After a quiz or \
+ask, end your turn: write nothing more, because the learner's answer arrives in the next message. Don't run shell commands \
+or read files; everything you need is in this conversation. No web search is available.";
 
-<lesson>
-markdown for the lesson canvas
-</lesson>
+const TOOL_NAMES: [&str; 4] = ["write_lesson", "quiz", "ask", "update_state"];
 
-<quiz>
-{\"question\": \"...\", \"options\": [\"...\", \"...\", \"...\"], \"correct_index\": 0, \"explanation\": \"...\"}
-</quiz>
-
-<ask>
-{\"question\": \"...\", \"options\": [\"...\", \"...\"]}
-</ask>
-
-<state>
-your lesson state, as Markdown
-</state>
-
-<lesson> is write_lesson, <quiz> is quiz, <ask> is ask and <state> is update_state, with the same rules. Quiz and ask contents must be valid JSON. \
-Text outside the blocks goes to the chat. A <quiz> or <ask> ends your turn: write nothing after it and wait, because the \
-next message tells you what the learner chose. No web search is available in this session.";
+const MCP_TOOLS: &str = "mcp__rlearn__write_lesson,mcp__rlearn__quiz,mcp__rlearn__ask,mcp__rlearn__update_state";
 
 const MATERIAL: &str = "\n\n# The learner's material";
 
 /// The conversation as plain text, with past actions written back in the tag format.
-pub fn transcript(messages: &[Value]) -> String {
+pub fn transcript(messages: &[Value], tags: bool) -> String {
     let mut s = String::from("# Conversation so far\n");
     for m in messages {
         let tutor = m["role"] == "assistant";
@@ -48,11 +34,15 @@ pub fn transcript(messages: &[Value]) -> String {
         for b in blocks {
             match (b["type"].as_str(), b["name"].as_str()) {
                 (Some("text"), _) => s += &format!("{}\n", b["text"].as_str().unwrap_or_default()),
-                (Some("tool_use"), Some(name @ ("write_lesson" | "update_state"))) => {
+                (Some("tool_use"), Some(name @ ("write_lesson" | "update_state"))) if tags => {
                     let tag = if name == "write_lesson" { "lesson" } else { "state" };
                     s += &format!("<{tag}>\n{}\n</{tag}>\n", b["input"]["markdown"].as_str().unwrap_or_default().trim_end())
                 }
-                (Some("tool_use"), Some(name)) => s += &format!("<{name}>\n{}\n</{name}>\n", b["input"]),
+                (Some("tool_use"), Some(name)) if tags => s += &format!("<{name}>\n{}\n</{name}>\n", b["input"]),
+                (Some("tool_use"), Some(name @ ("write_lesson" | "update_state"))) => {
+                    s += &format!("[called {name}]\n{}\n", b["input"]["markdown"].as_str().unwrap_or_default().trim_end())
+                }
+                (Some("tool_use"), Some(name)) => s += &format!("[called {name}] {}\n", b["input"]),
                 (Some("tool_result"), _) => {
                     let c = &b["content"];
                     s += &format!("[app] {}\n", c.as_str().map(String::from).unwrap_or_else(|| c.to_string()));
@@ -208,26 +198,41 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
         Some(i) => system.split_at(i),
         None => (system, ""),
     };
-    let instructions = format!("{instructions}{PROTOCOL}");
+    // rlearn's own binary is the MCP server that gives both CLIs the lesson tools.
+    // RLEARN_MCP_BIN lets tests point at the built app, since inside a test this process is the test runner.
+    let exe = match std::env::var_os("RLEARN_MCP_BIN") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_exe().map_err(|e| e.to_string())?,
+    };
+    let instructions = format!("{instructions}{MCP_PROTOCOL}");
+    let history = transcript(messages, false);
     let mut cmd;
     let input;
     if claude {
+        let mcp = json!({ "mcpServers": { "rlearn": { "command": exe, "args": ["--mcp"] } } }).to_string();
         cmd = Command::new("claude");
-        cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"])
-            .args(["--tools", "", "--safe-mode", "--no-session-persistence", "--system-prompt", &instructions])
+        cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--no-session-persistence"])
+            // no built-in tools, no personal settings, hooks or commands: only rlearn's server and tools
+            .args(["--tools", "", "--setting-sources", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", &mcp])
+            .args(["--allowedTools", MCP_TOOLS, "--max-turns", "12", "--system-prompt", &instructions])
             .env_remove("ANTHROPIC_API_KEY"); // use the signed-in subscription, never an API key from the environment
         if !p.model.is_empty() {
             cmd.args(["--model", &p.model]);
         }
-        input = format!("{}\n\n{}", material.trim(), transcript(messages));
+        input = format!("{}\n\n{history}", material.trim());
     } else {
         cmd = Command::new("codex");
-        cmd.args(["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"]).env_remove("OPENAI_API_KEY");
+        cmd.args(["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"])
+            .args(["-c", &format!("mcp_servers.rlearn.command={}", json!(exe)), "-c", "mcp_servers.rlearn.args=[\"--mcp\"]"])
+            .env_remove("OPENAI_API_KEY");
+        for tool in TOOL_NAMES {
+            cmd.args(["-c", &format!("mcp_servers.rlearn.tools.{tool}.approval_mode=\"approve\"")]); // non-interactive: pre-approve
+        }
         if !p.model.is_empty() {
             cmd.args(["-m", &p.model]);
         }
         cmd.arg("-");
-        input = format!("{instructions}{material}\n\n{}", transcript(messages));
+        input = format!("{instructions}{material}\n\n{history}"); // Codex takes the tutor's instructions on stdin
     }
     let name = if claude { "Claude Code" } else { "Codex" };
     let mut child = cmd
@@ -262,6 +267,10 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
 
     let mut actions = Actions::default();
     let mut failure: Option<String> = None;
+    // Claude Code runs several model messages per turn (tool call, result, next call…) and block indexes restart
+    // in each one, so every message gets its own key range. Thinking blocks are not kept: they only make sense
+    // inside Claude Code's own session.
+    let (mut base, mut tools) = (0u64, std::collections::HashSet::new());
     let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -276,8 +285,26 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
             let e = &v["event"];
             let usage = &mut acc.reply.usage;
             match v["type"].as_str() {
-                Some("stream_event") if e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" => {
-                    actions.feed(e["delta"]["text"].as_str().unwrap_or_default(), acc, ch)
+                Some("stream_event") => {
+                    let key = base + e["index"].as_u64().unwrap_or(0);
+                    match e["type"].as_str() {
+                        Some("message_start") => base += 1 << 20,
+                        Some("content_block_start") if e["content_block"]["type"] == "tool_use" => {
+                            actions.finish(acc, ch); // text before the call stays its own block
+                            let mut block = e["content_block"].clone();
+                            let name = block["name"].as_str().unwrap_or_default().trim_start_matches("mcp__rlearn__").to_owned();
+                            block["name"] = json!(name);
+                            acc.start(key, block, ch);
+                            tools.insert(key);
+                        }
+                        Some("content_block_delta") => match e["delta"]["type"].as_str() {
+                            Some("text_delta") => actions.feed(e["delta"]["text"].as_str().unwrap_or_default(), acc, ch),
+                            Some("input_json_delta") if tools.contains(&key) => acc.push(key, e["delta"]["partial_json"].as_str().unwrap_or_default(), ch),
+                            _ => {}
+                        },
+                        Some("content_block_stop") if tools.contains(&key) => acc.stop(key, ch),
+                        _ => {}
+                    }
                 }
                 Some("system") if v["subtype"] == "init" => {
                     usage.model = v["model"].as_str().unwrap_or_default().to_owned();
@@ -297,6 +324,16 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
             }
         } else if v["type"] == "item.completed" && v["item"]["type"] == "agent_message" {
             actions.feed(&format!("{}\n", v["item"]["text"].as_str().unwrap_or_default()), acc, ch);
+        } else if v["type"] == "item.started" && v["item"]["type"] == "mcp_tool_call" && v["item"]["server"] == "rlearn" {
+            // Codex reports each call whole: arguments are complete when it starts
+            let it = &v["item"];
+            actions.finish(acc, ch);
+            base += 1;
+            let key = (1 << 50) + base;
+            let id = format!("toolu_codex_{}_{base}", std::process::id());
+            acc.start(key, json!({ "type": "tool_use", "id": id, "name": it["tool"], "input": {} }), ch);
+            acc.push(key, &it["arguments"].to_string(), ch);
+            acc.stop(key, ch);
         } else if v["type"] == "turn.completed" {
             let u = &v["usage"]; // Codex counts cached tokens inside input_tokens
             let usage = &mut acc.reply.usage;
@@ -362,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn transcript_for_tool_using_cli_writes_call_records_not_tags() {
+        let history = vec![json!({ "role": "assistant", "content": [
+            { "type": "tool_use", "id": "1", "name": "write_lesson", "input": { "markdown": "# A" } },
+            { "type": "tool_use", "id": "2", "name": "quiz", "input": { "question": "Q" } }
+        ] })];
+        let t = transcript(&history, false);
+        assert!(t.contains("[called write_lesson]\n# A") && t.contains("[called quiz] {\"question\":\"Q\"}") && !t.contains("<lesson>"));
+    }
+
+    #[test]
     fn state_blocks_become_update_state_calls() {
         let ch: Channel<Event> = Channel::new(|_| Ok(()));
         let mut acc = Acc::default();
@@ -384,7 +431,7 @@ mod tests {
             ] }),
             json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "2", "content": "chose a" }] }),
         ];
-        let t = transcript(&history);
+        let t = transcript(&history, true);
         assert!(t.contains("## Learner\nteach me"));
         assert!(t.contains("<lesson>\n# A\n</lesson>"));
         assert!(t.contains("<quiz>\n{\"question\":\"Q\"}\n</quiz>"));
@@ -406,7 +453,7 @@ mod live {
         let p: Provider = serde_json::from_value(json!({ "id": kind, "kind": kind, "model": std::env::var("MODEL").unwrap_or_default() })).unwrap();
         let ch: Channel<Event> = Channel::new(|_| Ok(()));
         let mut acc = Acc::default();
-        let msgs = vec![json!({ "role": "user", "content": "Test of the format: write a <lesson> block whose markdown is just `# Hello`, then a <quiz> asking what 1+1 is with options 1 and 2." })];
+        let msgs = vec![json!({ "role": "user", "content": "Test: put a lesson section whose markdown is just `# Hello` on the canvas, then quiz me on what 1+1 is with options 1 and 2." })];
         run(&p, "You are a tutor.", &msgs, &ch, &mut acc).await.unwrap();
         acc.finish(&ch);
         println!("{}", serde_json::to_string_pretty(&json!({ "content": acc.reply.content, "usage": acc.reply.usage })).unwrap());

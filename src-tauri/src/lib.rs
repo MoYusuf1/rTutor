@@ -1,6 +1,7 @@
 mod cli;
 mod db;
 mod llm;
+pub mod mcp;
 mod pty;
 
 use db::{err, exec, Res};
