@@ -517,7 +517,7 @@ function showLesson() {
 
 async function openLesson(id) {
   const l = await invoke("get_lesson", { id });
-  lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sections.length, last: null };
+  lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sections.length, toolResults: l.toolResults ?? {}, last: null };
   target = l.folder;
   showLesson();
   for (const m of l.sections) {
@@ -656,7 +656,19 @@ async function addSection(markdown, live) {
 
 let turn = { live: new Map(), invalid: {}, truncated: false };
 
-async function runTool({ id, name, input = {} }) {
+async function runTool(call) {
+  lesson.toolResults ??= {};
+  if (lesson.toolResults[call.id]) {
+    turn.live.get(call.id)?.box.remove();
+    return lesson.toolResults[call.id];
+  }
+  const result = await executeTool(call);
+  await invoke("save_tool_result", { lesson: lesson.id, result });
+  lesson.toolResults[call.id] = result;
+  return result;
+}
+
+async function executeTool({ id, name, input = {} }) {
   const ok = (content) => ({ type: "tool_result", tool_use_id: id, content });
   const bad = (content) => ({ type: "tool_result", tool_use_id: id, content, is_error: true });
   const live = turn.live.get(id); // the section already streamed onto the canvas, if any
@@ -910,10 +922,11 @@ function showWho() {
 
 async function pickProvider(id) {
   chosen = id;
+  $("#p-status").textContent = "";
   const p = provider(id);
   for (const b of $("#p-list").children) b.setAttribute("aria-checked", String(b.dataset.id === id));
   $("#p-model").value = p.model;
-  $("#p-base").value = p.baseUrl;
+  $("#p-base").value = p.baseUrl ?? "";
   $("#p-base-row").hidden = p.kind !== "openai";
   $("#p-key-row").hidden = !!(p.keyless || p.local);
   $("#p-key").value = "";
@@ -949,6 +962,21 @@ $("#settings").addEventListener("close", async () => {
   showWho();
   if (lesson) renderMeter();
 });
+$("#p-test").onclick = async () => {
+  const button = $("#p-test");
+  button.disabled = true;
+  $("#p-status").textContent = "Connecting… This uses a small provider request.";
+  const p = { ...provider(chosen), model: $("#p-model").value.trim(), baseUrl: $("#p-base").value.trim() };
+  try {
+    const key = $("#p-key").value.trim();
+    if (key && !p.local && !p.keyless) await invoke("set_api_key", { provider: p.id, key });
+    $("#p-status").textContent = await invoke("test_provider", { provider: p });
+  } catch (e) {
+    $("#p-status").textContent = `Connection failed: ${e}`;
+  } finally {
+    button.disabled = false;
+  }
+};
 $("#model").onclick = openModel;
 
 async function ready() {

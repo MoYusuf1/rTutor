@@ -107,6 +107,28 @@ fn has_api_key(provider: String) -> Res<bool> {
     Ok(!read_key(&provider)?.is_empty())
 }
 
+// CLI providers use their own sign-in; a missing OS keyring must not block them.
+fn provider_key(provider: &llm::Provider) -> Res<String> {
+    if matches!(provider.kind.as_str(), "claude-code" | "codex") || provider.id == "ollama" {
+        Ok(String::new())
+    } else {
+        read_key(&provider.id)
+    }
+}
+
+/// Uses the same transport and tools as a lesson, without creating lesson history.
+#[tauri::command]
+async fn test_provider(store: State<'_, Store>, provider: llm::Provider) -> Res<String> {
+    let key = provider_key(&provider)?;
+    let channel = Channel::new(|_| Ok(()));
+    let messages = [json!({ "role": "user", "content": "Connection check: call write_lesson once with markdown exactly RLEARN_CONNECTED, then end your turn." })];
+    let reply = llm::chat(&store.http, &provider, &key, "Follow the connection check exactly. Do not ask questions.", &messages, &channel).await?;
+    if !reply.content.iter().any(|b| b["name"] == "write_lesson" && b["input"]["markdown"].as_str().is_some_and(|s| s.trim() == "RLEARN_CONNECTED")) {
+        return Err("The provider responded, but did not call the lesson tool. Check that this model supports tool calling.".into());
+    }
+    Ok(format!("Connected to {}. Lesson tool calling works.", if reply.usage.model.is_empty() { &provider.model } else { &reply.usage.model }))
+}
+
 // ---------- teaching ----------
 
 fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
@@ -135,7 +157,7 @@ async fn send(
     content: Option<Value>,
     on_event: Channel<llm::Event>,
 ) -> Res<llm::Reply> {
-    let key = read_key(&provider.id)?;
+    let key = provider_key(&provider)?;
     let (messages, system, from) = {
         let c = store.db()?;
         let mut o = store.open.lock().map_err(err)?;
@@ -227,8 +249,14 @@ fn get_lesson(store: State<Store>, id: i64) -> Res<Value> {
     let mut lesson = db::lesson(&c, id)?;
     let open = Open::load(id, db::messages(&c, id)?);
     lesson["messages"] = json!(*open.messages);
+    lesson["toolResults"] = db::tool_results(&c, id)?;
     *store.open.lock().map_err(err)? = open;
     Ok(lesson)
+}
+
+#[tauri::command]
+fn save_tool_result(store: State<Store>, lesson: i64, result: Value) -> Res<()> {
+    db::save_tool_result(&*store.db()?, lesson, &result)
 }
 
 #[tauri::command]
@@ -437,7 +465,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            send, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
+            send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize

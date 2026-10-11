@@ -330,7 +330,7 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
             actions.finish(acc, ch);
             base += 1;
             let key = (1 << 50) + base;
-            let id = format!("toolu_codex_{}_{base}", std::process::id());
+            let id = format!("toolu_codex_{}_{}", actions.id(), base);
             acc.start(key, json!({ "type": "tool_use", "id": id, "name": it["tool"], "input": {} }), ch);
             acc.push(key, &it["arguments"].to_string(), ch);
             acc.stop(key, ch);
@@ -443,6 +443,55 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+
+    /// Two real tutor turns, including quiz feedback, state and SQLite reload.
+    #[tokio::test]
+    #[ignore]
+    async fn lesson_answer_and_resume() {
+        let kind = std::env::var("CLI").unwrap_or_else(|_| "claude-code".into());
+        let p: Provider = serde_json::from_value(json!({ "id": kind, "kind": kind, "model": "" })).unwrap();
+        let ch = Channel::new(|_| Ok(()));
+        let system = "You are running a small tutor integration test. Follow each user instruction exactly. Use the lesson tools.";
+        let first = json!({ "role": "user", "content": "Write # Addition on the canvas, then quiz me: What is 1+1? options 1 and 2, correct_index 1. End the turn after the quiz." });
+        let mut messages = vec![first];
+        let http = reqwest::Client::new();
+        let a = crate::llm::chat(&http, &p, "", system, &messages, &ch).await.unwrap();
+        assert!(a.content.iter().any(|b| b["name"] == "write_lesson"));
+        assert!(a.content.iter().any(|b| b["name"] == "quiz"));
+        let ids: Vec<_> = a.content.iter().filter_map(|b| b["id"].as_str().map(String::from)).collect();
+        let mut results: Vec<Value> = a.content.iter().filter(|b| b["type"] == "tool_use").map(|b| json!({
+            "type": "tool_result", "tool_use_id": b["id"],
+            "content": if b["name"] == "quiz" { "The learner chose 2 (correct). The result card is already saved." } else { "Added to the canvas." }
+        })).collect();
+        results.push(json!({ "type": "text", "text": "Now call update_state with markdown exactly Addition mastered. Then write_lesson with markdown exactly # Next step. Do not quiz again." }));
+        messages.push(json!({ "role": "assistant", "content": a.content }));
+        messages.push(json!({ "role": "user", "content": results }));
+        let b = crate::llm::chat(&http, &p, "", system, &messages, &ch).await.unwrap();
+        assert!(b.content.iter().any(|v| v["name"] == "update_state" && v["input"]["markdown"].as_str().unwrap_or("").trim().trim_end_matches('.') == "Addition mastered"));
+        assert!(b.content.iter().any(|v| v["name"] == "write_lesson" && v["input"]["markdown"].as_str().unwrap_or("").trim() == "# Next step"));
+        assert!(b.content.iter().filter_map(|v| v["id"].as_str()).all(|id| !ids.iter().any(|old| old == id)));
+        messages.push(json!({ "role": "assistant", "content": b.content }));
+        let c = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        c.execute("INSERT INTO lessons (id, title, updated) VALUES (1, 'Addition', 0)", []).unwrap();
+        for (i, m) in messages.iter().enumerate() {
+            crate::db::append_message(&c, 1, i, m).unwrap();
+            if m["role"] == "assistant" {
+                for tool in m["content"].as_array().unwrap() {
+                    let markdown = tool["input"]["markdown"].as_str().unwrap_or("");
+                    match tool["name"].as_str() {
+                        Some("write_lesson") => { c.execute("INSERT INTO sections (lesson_id, markdown) VALUES (1, ?1)", [markdown]).unwrap(); }
+                        Some("update_state") => { c.execute("UPDATE lessons SET state = ?1 WHERE id = 1", [markdown]).unwrap(); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(crate::db::messages(&c, 1).unwrap(), messages);
+        let restored = crate::db::lesson(&c, 1).unwrap();
+        assert_eq!(restored["sections"].as_array().unwrap().len(), 2);
+        assert_eq!(restored["state"].as_str().unwrap().trim().trim_end_matches('.'), "Addition mastered");
+        println!("{}: lesson → quiz → correct answer → next section → state → reload passed", p.id);
+    }
 
     /// Real run against the signed-in CLI (uses a little of the subscription):
     /// CLI=claude-code cargo test --lib live -- --ignored --nocapture

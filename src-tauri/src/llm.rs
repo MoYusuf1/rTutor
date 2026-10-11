@@ -104,6 +104,15 @@ pub fn tools() -> Vec<Value> {
 }
 
 pub async fn chat(http: &reqwest::Client, p: &Provider, key: &str, system: &str, messages: &[Value], ch: &Channel<Event>) -> Result<Reply, String> {
+    if !matches!(p.kind.as_str(), "claude-code" | "codex") && p.model.trim().is_empty() {
+        return Err("Enter a model name before connecting.".into());
+    }
+    if p.kind == "openai" {
+        let url = reqwest::Url::parse(&p.base_url).map_err(|_| "Enter a valid provider URL.".to_owned())?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err("The provider URL must use http or https.".into());
+        }
+    }
     let mut acc = Acc::default();
     match p.kind.as_str() {
         "anthropic" => anthropic(http, p, key, system, messages, ch, &mut acc).await?,

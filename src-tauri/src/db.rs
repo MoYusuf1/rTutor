@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS lessons (
 CREATE TABLE IF NOT EXISTS messages (
   lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE, seq INTEGER NOT NULL, body TEXT NOT NULL,
   PRIMARY KEY (lesson_id, seq)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tool_results (
+  lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE, tool_id TEXT NOT NULL, body TEXT NOT NULL,
+  PRIMARY KEY (lesson_id, tool_id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sections (
   id INTEGER PRIMARY KEY, lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE, markdown TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS sections_by_lesson ON sections(lesson_id, id);
@@ -157,6 +160,23 @@ pub fn append_message(c: &Connection, lesson: i64, seq: usize, msg: &Value) -> R
     Ok(())
 }
 
+pub fn save_tool_result(c: &Connection, lesson: i64, result: &Value) -> Res<()> {
+    let id = result["tool_use_id"].as_str().ok_or("Missing tool call ID")?;
+    exec(c, "INSERT OR REPLACE INTO tool_results VALUES (?1, ?2, ?3)", params![lesson, id, result.to_string()])?;
+    Ok(())
+}
+
+pub fn tool_results(c: &Connection, lesson: i64) -> Res<Value> {
+    let mut out = serde_json::Map::new();
+    let mut q = c.prepare("SELECT tool_id, body FROM tool_results WHERE lesson_id = ?1").map_err(err)?;
+    let rows = q.query_map([lesson], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(err)?;
+    for row in rows {
+        let (id, body) = row.map_err(err)?;
+        out.insert(id, serde_json::from_str(&body).map_err(err)?);
+    }
+    Ok(Value::Object(out))
+}
+
 pub fn next_seq(c: &Connection, lesson: i64) -> Res<usize> {
     c.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM messages WHERE lesson_id = ?1", [lesson], |r| r.get::<_, i64>(0))
         .map(|n| n as usize)
@@ -265,6 +285,19 @@ mod tests {
         c.pragma_update(None, "foreign_keys", "ON").unwrap();
         migrate(&c).unwrap();
         c
+    }
+
+    #[test]
+    fn completed_tools_survive_reopening_and_cascade_with_lesson() {
+        let c = mem();
+        c.execute("INSERT INTO lessons (id, title, updated) VALUES (1, 'Test', 0)", []).unwrap();
+        let result = json!({ "type": "tool_result", "tool_use_id": "call-1", "content": "Added" });
+        save_tool_result(&c, 1, &result).unwrap();
+        save_tool_result(&c, 1, &result).unwrap();
+        assert_eq!(tool_results(&c, 1).unwrap()["call-1"], result);
+        assert_eq!(tool_results(&c, 1).unwrap().as_object().unwrap().len(), 1);
+        c.execute("DELETE FROM lessons WHERE id = 1", []).unwrap();
+        assert_eq!(tool_results(&c, 1).unwrap(), json!({}));
     }
 
     #[test]
