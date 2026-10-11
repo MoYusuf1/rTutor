@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
@@ -226,7 +227,7 @@ async function refresh() {
   renderSidebar();
 }
 
-// ---------- sidebar: folders with their lessons, recents ----------
+// ---------- sidebar: subjects with their lessons ----------
 
 function row(kind, item) {
   const r = el("div", `row ${kind}`);
@@ -237,6 +238,7 @@ function row(kind, item) {
   r.append(el("span", "label", item.name ?? item.title));
   if (kind === "source") r.append(el("span", "side", `${Math.round(item.words / 1000) || "<1"}k`));
   if (kind === "lesson" && item.id === lesson?.id) r.classList.add("active");
+  if (kind === "folder" && item.id === target && !$("#start").hidden) r.classList.add("active");
   r.draggable = kind !== "source";
   return r;
 }
@@ -251,14 +253,11 @@ function renderSidebar() {
       wrap.append(row("folder", f), kids);
       frag.append(wrap);
     }
-    if (parent != null) {
-      for (const s of data.sources.filter((x) => x.folder === parent)) frag.append(row("source", s));
-      for (const l of data.lessons.filter((x) => x.folder === parent)) frag.append(row("lesson", l));
-    }
+    for (const l of data.lessons.filter((x) => x.folder === parent)) frag.append(row("lesson", l));
     return frag;
   };
   $("#tree").replaceChildren(build(null));
-  $("#recents").replaceChildren(...data.lessons.filter((l) => l.folder == null).map((l) => row("lesson", l)));
+  if (!data.folders.length) $("#tree").append(el("p", "empty", "Your subjects and their lessons will be here."));
   const pins = data.lessons.filter((l) => l.bookmarked);
   $("#pinned-sec").hidden = !pins.length;
   $("#pinned").replaceChildren(...pins.map((l) => row("lesson", l)));
@@ -274,9 +273,13 @@ $("#side-scroll").addEventListener("click", (e) => {
   if (!r || r.querySelector("input")) return;
   const { kind, id, it } = item(r);
   if (kind === "folder") {
-    opened.has(id) ? opened.delete(id) : opened.add(id);
+    // the chevron only folds; the name opens the subject (and unfolds it)
+    const fold = e.target.closest(".chev") || (target === id && !$("#start").hidden);
+    if (fold && opened.has(id)) opened.delete(id);
+    else opened.add(id);
     store.set("learn.open", [...opened]);
-    r.parentElement.classList.toggle("open", opened.has(id));
+    if (!e.target.closest(".chev")) startNew(id);
+    else r.parentElement.classList.toggle("open", opened.has(id));
   } else if (kind === "lesson") openLesson(id);
   else openSource(it);
 });
@@ -324,16 +327,16 @@ const side = $("#side-scroll");
 side.addEventListener("dragstart", (e) => { dragged = item(e.target.closest(".row")); });
 side.addEventListener("dragover", (e) => {
   const r = e.target.closest(".row");
-  const loose = e.target.closest("#recents");
-  if (!dragged || (!loose && r?.dataset.kind !== "folder")) return;
+  // lessons go into a subject; a folder can also go back to the top level
+  if (!dragged || (r ? r.dataset.kind !== "folder" : dragged.kind !== "folder")) return;
   e.preventDefault();
   for (const x of document.querySelectorAll(".drop")) x.classList.remove("drop");
-  (loose ? $("#recents") : r).classList.add("drop");
+  r?.classList.add("drop");
 });
 side.addEventListener("drop", async (e) => {
   e.preventDefault();
   const r = e.target.closest(".row");
-  const folder = e.target.closest("#recents") ? null : r ? Number(r.dataset.id) : undefined;
+  const folder = r ? Number(r.dataset.id) : dragged?.kind === "folder" ? null : undefined;
   if (dragged && folder !== undefined && !(dragged.kind === "folder" && dragged.id === folder)) {
     await invoke("move_item", { kind: dragged.kind, id: dragged.id, folder }).catch(() => {}); // refused if it would nest a folder in itself
     if (folder != null) opened.add(folder);
@@ -379,19 +382,16 @@ addEventListener("keydown", (e) => {
 side.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   const r = e.target.closest(".row");
-  if (!r) return menu(e.clientX, e.clientY, [
-    { label: "New lesson", run: () => startNew(null) },
-    { label: "New folder", run: () => newFolder(null) },
-  ]);
+  if (!r) return menu(e.clientX, e.clientY, [{ label: "New subject", run: () => startNew(null) }]);
   const { kind, id, it } = item(r);
   if (kind === "folder") {
     menu(e.clientX, e.clientY, [
-      { label: "New lesson here", run: () => startNew(id) },
-      { label: "New folder inside", run: () => newFolder(id) },
+      { label: "New lesson", run: () => startNew(id) },
       { label: "Add material", run: () => attach({ folder: id }) },
+      { label: "New folder inside", run: () => newFolder(id) },
       "-",
       { label: "Rename", run: () => rename(r) },
-      { label: "Delete folder", danger: true, run: async () => {
+      { label: "Delete subject", danger: true, run: async () => {
         await invoke("delete_folder", { id });
         if (lesson && !data.lessons.some((l) => l.id === lesson.id && l.folder !== id)) startNew(null);
         refresh();
@@ -481,14 +481,55 @@ function chip(name, words, onRemove) {
 
 let pending = []; // material picked on the start screen, saved when the lesson starts
 
+const GEARS = {
+  scratch: { label: "Start from scratch", about: "New to this? Learn it from the foundations up.", phase: "plan",
+    tell: "I'm new to this. Don't test what I know beyond one question about my goal: plan, then teach from the foundations." },
+  probe: { label: "Find what I know", about: "A few questions first, so the lessons start at your level.", phase: "probe",
+    tell: "Start by finding out what I already know." },
+  test: { label: "Test me", about: "Already familiar? Find the gaps, then fill them.", phase: "review",
+    tell: "I'm already familiar with this. Test me to find my gaps, then teach what I miss." },
+};
+let gear = store.get("learn.gear", "probe");
+
 function renderStart() {
   const path = folderPath(target);
-  $("#crumb").textContent = path.length ? path.join(" / ") : "";
-  $("#materials").replaceChildren(
-    ...materialsFor(target).map((s) => chip(s.name, s.words)),
-    ...pending.map((p, i) => chip(p.name, p.words, () => { pending.splice(i, 1); renderStart(); })),
+  const subject = target != null;
+  $("#crumb").textContent = subject ? (path.length > 1 ? `${path.slice(0, -1).join(" / ")} · New lesson` : "New lesson") : "";
+  $("#start-title").textContent = subject ? path.at(-1) : "What do you want to learn?";
+  $("#start-input").setAttribute("aria-label", subject ? "What should this lesson cover?" : "What do you want to learn?");
+  $("#materials").replaceChildren(...pending.map((p, i) => chip(p.name, p.words, () => { pending.splice(i, 1); renderStart(); })));
+  $("#gears").replaceChildren(
+    ...Object.entries(GEARS).map(([id, g]) => {
+      const b = el("button", "gear");
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", String(id === gear));
+      b.append(el("b", "", g.label), el("span", "", g.about));
+      b.onclick = () => { gear = id; store.set("learn.gear", id); renderStart(); };
+      return b;
+    }),
   );
+  $("#library").hidden = !subject;
+  if (subject) {
+    $("#library-list").replaceChildren(
+      ...materialsFor(target).map((s) => {
+        const r = el("div", "mat");
+        r.innerHTML = icon("doc", 15);
+        const name = el("button", "name", s.name);
+        name.type = "button";
+        name.onclick = () => openSource(s);
+        const x = el("button", "icon");
+        x.type = "button";
+        x.innerHTML = icon("x", 13);
+        x.title = `Remove ${s.name}`;
+        x.onclick = async () => { await invoke("delete_source", { id: s.id }); await refresh(); renderStart(); };
+        r.append(name, el("small", "", `${s.words.toLocaleString()} words`), x);
+        return r;
+      }),
+    );
+  }
 }
+$("#add-material").onclick = () => attach({ folder: target });
 
 /** Leaving the open lesson: anything still waiting on the learner there is let go. */
 function leave() {
@@ -508,23 +549,43 @@ function startNew(folder) {
   renderSidebar();
   $("#start-input").focus();
 }
+$("#new-subject").onclick = () => startNew(null);
+
+/** Adds picked or dropped material to `folder`, or holds it for the subject about to be made. */
+async function addMaterial(files, folder) {
+  for (const f of files) {
+    if (folder != null) await invoke("add_source", { folder, lesson: null, name: f.name, text: f.text });
+    else pending.push(f);
+  }
+  if (folder != null) await refresh();
+  if (!$("#start").hidden) renderStart();
+  if (lesson && folder === lesson.folder) $("#lesson-materials").replaceChildren(...lessonChips());
+}
 
 async function attach({ folder } = {}) {
   try {
-    const picked = await invoke("pick_source");
-    if (!picked) return;
-    if (folder != null) {
-      await invoke("add_source", { folder, lesson: null, name: picked.name, text: picked.text });
-      opened.add(folder);
-      await refresh();
-    } else {
-      pending.push(picked);
-    }
-    if (!$("#start").hidden) renderStart();
+    await addMaterial(await invoke("pick_source"), folder ?? null);
   } catch (e) {
     alert(e);
   }
 }
+
+// files dropped anywhere on the window become material for whatever subject is open
+try {
+  getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+    $("#dropping").hidden = payload.type !== "over" && payload.type !== "enter";
+    if (payload.type !== "drop") return;
+    $("#dropping").hidden = true;
+    const folder = lesson ? lesson.folder : !$("#start").hidden ? target : null;
+    try {
+      const files = [];
+      for (const path of payload.paths) files.push(await invoke("read_source", { path }));
+      await addMaterial(files, folder);
+    } catch (e) {
+      alert(e);
+    }
+  });
+} catch { /* outside the app window (tests) */ }
 $("#attach").onclick = () => attach();
 
 async function openSource(s) {
@@ -540,11 +601,19 @@ async function openSource(s) {
   $("#doc").scrollTop = 0;
 }
 
-const leadHeading = (markdown = "") => markdown.match(/^#{1,2}\s+(.+)$/m)?.[1].replace(/[*_`$]/g, "").trim().slice(0, 80);
+const leadHeading = (markdown = "") => markdown.match(/^#{1,2}\s+(.+)$/m)?.[1].replace(/[*_`$]/g, "").trim().slice(0, 200);
 
 function showNotes(markdown) {
   $("#notes").hidden = !markdown;
   if (markdown) $("#notes-body").replaceChildren(md(markdown));
+}
+
+function lessonChips() {
+  return materialsFor(lesson.folder, lesson.id).map((s) => {
+    const c = chip(s.name, s.words);
+    c.onclick = () => openSource(s);
+    return c;
+  });
 }
 
 function showLesson() {
@@ -554,7 +623,7 @@ function showLesson() {
   $("#canvas-body").classList.remove("titled");
   log().replaceChildren();
   showNotes(lesson.state);
-  $("#lesson-materials").replaceChildren(...materialsFor(lesson.folder, lesson.id).map((s) => chip(s.name, s.words)));
+  $("#lesson-materials").replaceChildren(...lessonChips());
   renderSuggest();
 }
 
@@ -583,6 +652,9 @@ async function openLesson(id) {
       }
     }
   }
+  // no phase reported yet: the gear the lesson was started in
+  const opener = l.messages[0]?.content;
+  lesson.phase ??= typeof opener === "string" ? Object.values(GEARS).find((g) => opener.endsWith(g.tell))?.phase ?? null : null;
   const last = l.messages.at(-1);
   lesson.last = last?.role === "assistant" ? last.content : null;
   renderSidebar();
@@ -762,6 +834,17 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     if (here) renderSuggest();
     return ok(`Phase: ${input.phase}.`);
   }
+  if (name === "search_material") {
+    if (typeof input.query !== "string") return bad("search_material needs a query.");
+    return ok(await invoke("material_search", { lesson: to.id, query: input.query }));
+  }
+  if (name === "read_material") {
+    try {
+      return ok(await invoke("material_read", { lesson: to.id, material: Number(input.material), part: Number(input.part) }));
+    } catch (e) {
+      return bad(String(e));
+    }
+  }
   if (name === "say") {
     if (typeof input.text !== "string") return bad("say needs text.");
     if (here) say(input.text);
@@ -799,19 +882,43 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
   return bad(`Unknown tool: ${name}`);
 }
 
-// ---------- shortcuts for the lesson's phase ----------
+// ---------- the lesson's phase: shown, explained, and switchable ----------
 
+const PHASES = {
+  probe: ["Probe", "A few quick questions to find where your knowledge ends, so teaching starts at the right place."],
+  plan: ["Plan", "Mapping the ideas between what you know and your goal, in the order they build on each other."],
+  teach: ["Teach", "One idea at a time: why it matters, how it follows from what you know, then a quick check."],
+  review: ["Review", "Questions across everything covered so far, to find what needs another pass."],
+};
+const SWITCH = {
+  probe: "Let's switch to probing: find out what I already know.",
+  plan: "Let's switch to planning: show me the plan.",
+  teach: "Let's switch to teaching.",
+  review: "Let's switch to review: test me on what we've covered.",
+};
 const SUGGEST = {
-  probe: [["Start teaching", "That's enough questions about what I know. Make the plan and start teaching."], ["Keep checking", "Keep checking what I know."], ["Test me instead", "Skip the lesson and test me on this topic."]],
+  probe: [["Harder questions", "Ask me harder questions."], ["I've never studied this", "I've never studied this. Stop probing and start from the foundations."]],
   plan: [["Looks good, start", "The plan looks good. Start teaching."], ["Change the plan", "I'd like to change the plan."]],
-  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."], ["Slow down", "Slow down and take smaller steps."]],
-  review: [["Back to teaching", "Let's go back to teaching the next part."], ["Harder", "Make the questions harder."], ["Explain my misses", "Explain the ones I got wrong."]],
+  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Slow down", "Slow down and take smaller steps."]],
+  review: [["Harder", "Make the questions harder."], ["Explain my misses", "Explain the ones I got wrong."]],
 };
 
 function renderSuggest() {
-  const box = $("#suggest");
-  box.replaceChildren(
-    ...(SUGGEST[lesson?.phase] ?? []).map(([label, text]) => {
+  const phase = lesson?.phase;
+  $("#steps").replaceChildren(
+    ...Object.entries(PHASES).map(([id, [label]]) => {
+      const b = el("button", "step", label);
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", String(id === phase));
+      b.title = id === phase ? PHASES[id][1] : `Switch to ${label.toLowerCase()}`;
+      b.onclick = () => id !== phase && send(SWITCH[id]);
+      return b;
+    }),
+  );
+  $("#phase-why").textContent = PHASES[phase]?.[1] ?? "";
+  $("#suggest").replaceChildren(
+    ...(SUGGEST[phase] ?? []).map(([label, text]) => {
       const b = el("button", "", label);
       b.type = "button";
       b.onclick = () => send(text);
@@ -1006,7 +1113,7 @@ function setDrawer(open) {
 function showWhere() {
   $("#where").hidden = false;
   for (const t of tabs) t.el.hidden = true;
-  $("#where-dir").textContent = settings.cwd || home;
+  $("#where-dir").textContent = settings.cwd || library();
   $("#where-dir").title = "Choose a folder";
 }
 $("#where-dir").onclick = async () => {
@@ -1019,9 +1126,11 @@ $("#where-dir").onclick = async () => {
 };
 $("#where").onsubmit = (e) => {
   e.preventDefault();
-  newTab(settings.cwd || home);
+  newTab(settings.cwd || library());
 };
 
+/** ~/rlearn: every subject's material is a folder of Markdown files in here, so an agent started here can read it all. */
+const library = () => (home ? `${home}${home.includes("\\") ? "\\" : "/"}rlearn` : "");
 const short = (dir = "") => dir.split(/[\\/]/).filter(Boolean).pop() || "~";
 
 /** Commands that start each agent wired to rlearn, so a click is all it takes. */
@@ -1166,7 +1275,10 @@ dragResize($("#chat-grip"), (m) => {
   const box = $("#lesson").getBoundingClientRect();
   rootVar("--chat-w", `${Math.round(Math.min(box.width - 360, Math.max(320, box.right - m.clientX)))}px`);
 }, () => store.set("learn.chatW", getComputedStyle(document.documentElement).getPropertyValue("--chat-w")));
-for (const [k, name] of [["learn.drawerH", "--drawer-h"], ["learn.chatW", "--chat-w"]]) {
+dragResize($("#side-grip"), (m) => {
+  rootVar("--side-w", `${Math.round(Math.min(480, Math.max(200, m.clientX)))}px`);
+}, () => store.set("learn.sideW", getComputedStyle(document.documentElement).getPropertyValue("--side-w")));
+for (const [k, name] of [["learn.drawerH", "--drawer-h"], ["learn.chatW", "--chat-w"], ["learn.sideW", "--side-w"]]) {
   const saved = store.get(k, null);
   if (saved) rootVar(name, saved);
 }
@@ -1351,16 +1463,25 @@ $("#start-form").onsubmit = async (e) => {
   e.preventDefault();
   const text = $("#start-input").value.trim();
   const material = materialsFor(target).length + pending.length > 0;
-  if (!text && !material) return;
+  if (!text && !material) return $("#start-input").focus();
   if (usingAgent() ? !agents.length : !(await ready())) return usingAgent() ? openTerminal() : openModel();
-  const first = text || "Teach me this material.";
-  const title = text.split("\n")[0].slice(0, 60) || pending[0]?.name.replace(/\.\w+$/, "") || "New lesson";
-  const id = await invoke("create_lesson", { folder: target, title });
-  for (const p of pending) await invoke("add_source", { folder: null, lesson: id, name: p.name, text: p.text });
-  pending = [];
+  const g = GEARS[gear] ?? GEARS.probe;
+  const first = `${text || "Teach me this material."}\n\n${g.tell}`;
+  const title = text.split("\n")[0].slice(0, 200) || pending[0]?.name.replace(/\.\w+$/, "") || "New lesson";
+  // a lesson always lives in a subject: from the home screen, the subject is made first
+  let folder = target;
+  if (folder == null) {
+    folder = await invoke("create_folder", { parent: null, name: title });
+    for (const p of pending) await invoke("add_source", { folder, lesson: null, name: p.name, text: p.text });
+    pending = [];
+  }
+  opened.add(folder);
+  store.set("learn.open", [...opened]);
+  const id = await invoke("create_lesson", { folder, title });
   await refresh();
   leave();
-  lesson = { id, title, folder: target, state: "", sections: 0, phase: null, last: null, toolResults: {} };
+  target = folder;
+  lesson = { id, title, folder, state: "", sections: 0, phase: g.phase, last: null, toolResults: {} };
   showLesson();
   renderSidebar();
   send(first);
@@ -1376,8 +1497,7 @@ $("#composer").onsubmit = (e) => {
 $("#start-input").onkeydown = enterSubmits($("#start-form"));
 $("#input").onkeydown = enterSubmits($("#composer"));
 $("#input").oninput = () => grow($("#input"));
-$("#new-lesson").onclick = () => startNew(null);
-$("#new-folder").onclick = () => newFolder(null);
+
 
 settings = { ...settings, ...((await invoke("get_settings")) ?? {}) };
 if (!["agent", "api"].includes(settings.active)) settings.active = "agent"; // older settings named a provider here

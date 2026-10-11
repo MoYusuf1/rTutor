@@ -10,7 +10,7 @@ async function agentFlow(browser, engine) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
-    const state = { lessons: [], sent: [], results: {} };
+    const state = { lessons: [], folders: [], sent: [], results: {} };
     window.__state = state;
     window.__TAURI_INTERNALS__ = {
       transformCallback: () => 1,
@@ -21,8 +21,9 @@ async function agentFlow(browser, engine) {
           case "get_settings": return { active: "agent", providers: {} };
           case "agent_listen": window.__agent = args.onEvent; return;
           case "mcp_command": return { bin: "/opt/rlearn", home: "/home/learner" };
-          case "tree": return { lessons: state.lessons, folders: [], sources: [] };
-          case "create_lesson": state.lessons.push({ id: 1, title: args.title, folder: null, state: "", sections: [], messages: [], toolResults: {} }); return 1;
+          case "tree": return { lessons: state.lessons, folders: state.folders, sources: [] };
+          case "create_folder": state.folders.push({ id: 1, parent: null, name: args.name }); return 1;
+          case "create_lesson": state.lessons.push({ id: 1, title: args.title, folder: args.folder, state: "", sections: [], messages: [], toolResults: {} }); return 1;
           case "get_lesson": return structuredClone(lesson);
           case "add_section": lesson.sections.push(args.markdown); return;
           case "rename_lesson": lesson.title = args.title; return;
@@ -40,14 +41,20 @@ async function agentFlow(browser, engine) {
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: false }], active: 7 });
   await page.locator("#who").getByText("Claude Code").waitFor();
   assert.ok(await page.locator("#who-logo svg[fill='#D97757']").count(), "the Claude logo marks the agent");
-  await page.locator("#start-input").fill("Teach me circuits");
+  const long = "Teach me circuits, from Ohm's law up to how a real power supply keeps its voltage steady";
+  await page.locator("#start-input").fill(long);
+  await page.locator('.gear:has-text("Test me")').click();
   await page.locator("#start-btn").click();
-  await page.locator(".msg.user").getByText("Teach me circuits").waitFor();
   await page.locator(".thinking").waitFor();
-  assert.deepEqual(await page.evaluate(() => window.__state.sent), ["Teach me circuits"]);
+  assert.equal(await page.locator("#title").innerText(), long, "the lesson title isn't cut short");
+  assert.equal(await page.locator('#tree .row.folder .label').innerText(), long, "a new lesson starts its own subject");
+  assert.equal(await page.locator('.step[aria-checked="true"]').innerText(), "Review", "the chosen gear shows as the phase");
+  const [first] = await page.evaluate(() => window.__state.sent);
+  assert.ok(first.startsWith(long) && /test me/i.test(first), "the starting gear goes to the tutor");
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: true }], active: 7 });
   await emit({ type: "call", id: 1, agent: 7, lesson: 1, name: "phase", input: { phase: "probe" } });
-  await page.locator("#suggest").getByText("Start teaching").waitFor();
+  await page.locator("#suggest").getByText("Harder questions").waitFor();
+  assert.ok((await page.locator("#phase-why").innerText()).includes("where your knowledge ends"), "the phase explains itself");
   await emit({ type: "call", id: 2, agent: 7, lesson: 1, name: "quiz", input: { question: "What carries current?", options: ["Charge", "Voltage"], correct_index: 0, explanation: "Current is moving charge." } });
   await page.locator(".card.quiz").waitFor();
   assert.equal(await page.locator(".thinking").count(), 0, "no thinking indicator while waiting on the learner");
@@ -61,9 +68,9 @@ async function agentFlow(browser, engine) {
   await page.locator(".msg.bot").getByText("Good question, see the canvas.").waitFor();
   await emit({ type: "call", id: 4, agent: 7, lesson: 1, name: "write_lesson", input: { markdown: "# Voltage\nPush per charge." } });
   await page.locator("#canvas-body").getByText("Push per charge.").waitFor();
-  await page.locator("#suggest").getByText("Start teaching").click();
+  await page.locator(".step", { hasText: "Teach" }).click();
   await page.waitForFunction(() => window.__state.sent.length === 2);
-  assert.match((await page.evaluate(() => window.__state.sent))[1], /start teaching/i);
+  assert.match((await page.evaluate(() => window.__state.sent))[1], /switch to teaching/i);
   await emit({ type: "agents", agents: [], active: null });
   await page.locator("#who").getByText("No agent running").waitFor();
   assert.deepEqual(errors, []);
@@ -85,7 +92,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.addInitScript(() => {
-      const state = JSON.parse(localStorage.getItem("smoke.db") || "null") || { lessons: [], turns: 0 };
+      const state = JSON.parse(localStorage.getItem("smoke.db") || "null") || { lessons: [], folders: [], turns: 0 };
       const save = () => localStorage.setItem("smoke.db", JSON.stringify(state));
       let nextCallback = 0;
       window.__TAURI_INTERNALS__ = {
@@ -102,11 +109,12 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
             case "test_provider":
               if (args.provider.id === "openai") throw "Invalid API key";
               return "Connected. Lesson tool calling works.";
-            case "tree": return { lessons: state.lessons, folders: [], sources: [] };
+            case "tree": return { lessons: state.lessons, folders: state.folders, sources: [] };
             case "stats": return {};
+            case "create_folder": state.folders.push({ id: state.folders.length + 1, parent: null, name: args.name }); save(); return state.folders.length;
             case "create_lesson": {
               const id = state.lessons.length + 1;
-              state.lessons.push({ id, title: args.title, folder: null, state: "", sections: [], messages: [], toolResults: {} });
+              state.lessons.push({ id, title: args.title, folder: args.folder, state: "", sections: [], messages: [], toolResults: {} });
               save(); return id;
             }
             case "get_lesson": return structuredClone(lesson);
@@ -155,7 +163,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     assert.equal(await page.locator("#input").isEnabled(), true, "the composer stays usable while a quiz waits");
     // Simulate closing the app while waiting for an answer.
     await page.reload();
-    await page.locator('#recents [data-kind="lesson"]').click();
+    await page.locator('#tree [data-kind="lesson"]').click();
     await page.locator(".card.quiz").waitFor();
     assert.equal(await page.locator("#canvas-body h1").count(), 1, "resume duplicated a lesson section");
     await page.locator(".card.quiz .opt").nth(answer).click();
@@ -174,7 +182,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     assert.equal(Object.keys(saved.lessons[0].toolResults).length, 4);
     assert.ok(saved.lessons[0].messages[2].content.some((b) => b.tool_use_id === "quiz-1"));
     await page.reload();
-    await page.locator('#recents [data-kind="lesson"]').click();
+    await page.locator('#tree [data-kind="lesson"]').click();
     await page.locator("#notes-body").getByText("Addition checked. Next: practice.").waitFor({ state: "attached" });
     assert.equal(await page.locator("#canvas-body h1").count(), 1);
     for (const colorScheme of ["light", "dark"]) {

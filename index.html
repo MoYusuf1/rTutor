@@ -8,12 +8,10 @@
 </head>
 <body>
   <aside id="sidebar">
-    <header class="brand">
-      <span class="logo" title="rlearn">L</span>
-      <button id="collapse" class="icon" data-icon="sidebar" title="Hide sidebar"></button>
-    </header>
+    <div id="side-grip" title="Drag to resize"></div>
     <nav class="actions">
-      <button id="new-lesson" class="act"><span data-icon="edit"></span>New lesson</button>
+      <button id="collapse" class="icon" data-icon="sidebar" title="Hide sidebar"></button>
+      <button id="new-subject" class="act"><span data-icon="edit"></span>New subject</button>
       <button id="search-btn" class="act"><span data-icon="search"></span>Search</button>
       <input id="search-input" type="search" aria-label="Search lessons" placeholder="Search lessons" spellcheck="false" hidden>
     </nav>
@@ -21,8 +19,7 @@
       <div id="results" class="list" hidden></div>
       <div id="sections">
         <section id="pinned-sec" hidden><h3>Pinned</h3><div id="pinned"></div></section>
-        <section><h3>Folders<button id="new-folder" class="icon mini" data-icon="plus" title="New folder"></button></h3><div id="tree" role="tree"></div></section>
-        <section><h3>Recents</h3><div id="recents"></div></section>
+        <section><h3>Subjects</h3><div id="tree" role="tree"></div></section>
       </div>
     </div>
     <div id="offer" hidden></div>
@@ -37,7 +34,7 @@
   <main id="start">
     <form id="start-form">
       <div id="crumb" class="crumb"></div>
-      <h1>What do you want to learn?</h1>
+      <h1 id="start-title">What do you want to learn?</h1>
       <div class="start-box">
         <textarea id="start-input" rows="3" aria-label="What do you want to learn?"></textarea>
         <div class="start-foot">
@@ -46,6 +43,12 @@
           <button id="start-btn" class="primary">Start</button>
         </div>
       </div>
+      <div id="gears" class="gears" role="radiogroup" aria-label="How to start"></div>
+      <section id="library" hidden>
+        <h2>Material</h2>
+        <div id="library-list"></div>
+        <button type="button" id="add-material" class="add"><span data-icon="plus"></span>Add a textbook, slides, notes or a transcript</button>
+      </section>
     </form>
   </main>
 
@@ -60,6 +63,10 @@
     </section>
     <aside id="chat" aria-label="Chat">
       <div id="chat-grip" title="Drag to resize"></div>
+      <header class="phase">
+        <div id="steps" role="radiogroup" aria-label="Phase"></div>
+        <p id="phase-why"></p>
+      </header>
       <div id="log" aria-live="polite"></div>
       <div id="suggest" class="suggest"></div>
       <form id="composer">
@@ -95,6 +102,7 @@
   </section>
 
   <div id="menu" role="menu" hidden></div>
+  <div id="dropping" hidden><p>Drop to add as material</p></div>
 
   <dialog id="settings">
     <form method="dialog">

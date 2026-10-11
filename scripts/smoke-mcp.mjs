@@ -14,5 +14,5 @@ assert.ifError(result.error);
 assert.equal(result.status, 0, result.stderr);
 const replies = result.stdout.trim().split("\n").map((line) => JSON.parse(line));
 assert.equal(replies[0].result.serverInfo.name, "rlearn");
-assert.deepEqual(replies[1].result.tools.map((tool) => tool.name), ["next", "write_lesson", "quiz", "update_state", "ask", "phase", "say"]);
+assert.deepEqual(replies[1].result.tools.map((tool) => tool.name), ["next", "write_lesson", "quiz", "update_state", "ask", "search_material", "read_material", "phase", "say"]);
 console.log("Built app MCP startup and tool discovery passed"); // tool calls need the running app (bridge.rs)

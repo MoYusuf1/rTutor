@@ -38,7 +38,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(markdown, content='se
 CREATE TRIGGER IF NOT EXISTS sections_ai AFTER INSERT ON sections BEGIN
   INSERT INTO sections_fts(rowid, markdown) VALUES (new.id, new.markdown); END;
 CREATE TRIGGER IF NOT EXISTS sections_ad AFTER DELETE ON sections BEGIN
-  INSERT INTO sections_fts(sections_fts, rowid, markdown) VALUES ('delete', old.id, old.markdown); END;";
+  INSERT INTO sections_fts(sections_fts, rowid, markdown) VALUES ('delete', old.id, old.markdown); END;
+CREATE TABLE IF NOT EXISTS parts (
+  id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS parts_by_source ON parts(source_id, seq);
+CREATE VIRTUAL TABLE IF NOT EXISTS parts_fts USING fts5(body, content='parts', content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS parts_ai AFTER INSERT ON parts BEGIN
+  INSERT INTO parts_fts(rowid, body) VALUES (new.id, new.body); END;
+CREATE TRIGGER IF NOT EXISTS parts_ad AFTER DELETE ON parts BEGIN
+  INSERT INTO parts_fts(parts_fts, rowid, body) VALUES ('delete', old.id, old.body); END;";
 
 pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let c = Connection::open(path)?;
@@ -53,7 +62,8 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version >= 2 {
         c.execute_batch(SCHEMA)?; // idempotent: adds tables introduced since (e.g. turns)
-        return add_lesson_columns(c);
+        add_lesson_columns(c)?;
+        return if version < 3 { subjects(c) } else { Ok(()) };
     }
     // version 1 kept each lesson as one JSON blob; carry those lessons over
     let v1 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = 'data'", [], |r| r.get::<_, i64>(0))? > 0;
@@ -82,15 +92,61 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
         tx.execute_batch("DROP TABLE lessons_v1;")?;
     }
     tx.pragma_update(None, "user_version", 2)?;
+    tx.commit()?;
+    add_lesson_columns(c)?;
+    subjects(c)
+}
+
+/// Version 3: every lesson belongs to a subject (a top-level folder), and material is split into parts.
+fn subjects(c: &Connection) -> rusqlite::Result<()> {
+    let tx = c.unchecked_transaction()?;
+    let loose: Vec<(i64, String, Option<String>)> = {
+        let mut q = tx.prepare("SELECT id, title, (SELECT body FROM messages WHERE lesson_id = lessons.id ORDER BY seq LIMIT 1) FROM lessons WHERE folder_id IS NULL")?;
+        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (id, mut title, first) in loose {
+        // titles used to be cut at 60 characters; the first message still has the whole line
+        let first = first.and_then(|b| serde_json::from_str::<Value>(&b).ok()).and_then(|m| m["content"].as_str().map(|t| t.lines().next().unwrap_or_default().trim().to_owned()));
+        if let Some(full) = first.filter(|f| title.chars().count() == 60 && f.starts_with(&title)) {
+            title = full;
+            tx.execute("UPDATE lessons SET title = ?2 WHERE id = ?1", params![id, title])?;
+        }
+        tx.execute("INSERT INTO folders (name) VALUES (?1)", [&title])?;
+        tx.execute("UPDATE lessons SET folder_id = ?2 WHERE id = ?1", params![id, tx.last_insert_rowid()])?;
+    }
+    let unsplit: Vec<(i64, String)> = {
+        let mut q = tx.prepare("SELECT id, body FROM sources WHERE NOT EXISTS (SELECT 1 FROM parts WHERE source_id = sources.id)")?;
+        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (id, body) in unsplit {
+        add_parts(&tx, id, &body)?;
+    }
+    tx.pragma_update(None, "user_version", 3)?;
     tx.commit()
 }
 
-/// Lesson-state columns, added in place to databases created before them.
+pub fn add_parts(c: &Connection, source: i64, body: &str) -> rusqlite::Result<()> {
+    let mut q = c.prepare_cached("INSERT INTO parts (source_id, seq, label, body) VALUES (?1, ?2, ?3, ?4)")?;
+    for (seq, (label, text)) in crate::material::chunk(body).into_iter().enumerate() {
+        q.execute(params![source, seq as i64 + 1, label, text])?;
+    }
+    Ok(())
+}
+
+/// Columns added in place to databases created before them.
 fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
-    for (col, decl) in [("state", "TEXT NOT NULL DEFAULT ''"), ("compact_from", "INTEGER NOT NULL DEFAULT 0"), ("compact_state", "TEXT NOT NULL DEFAULT ''")] {
-        let has: i64 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = ?1", [col], |r| r.get(0))?;
+    let added = [
+        ("lessons", "state", "TEXT NOT NULL DEFAULT ''"),
+        ("lessons", "compact_from", "INTEGER NOT NULL DEFAULT 0"),
+        ("lessons", "compact_state", "TEXT NOT NULL DEFAULT ''"),
+        ("sources", "file", "TEXT NOT NULL DEFAULT ''"),
+    ];
+    for (table, col, decl) in added {
+        let has: i64 = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [col], |r| r.get(0))?;
         if has == 0 {
-            c.execute_batch(&format!("ALTER TABLE lessons ADD COLUMN {col} {decl};"))?;
+            c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?;
         }
     }
     Ok(())
@@ -195,6 +251,83 @@ pub fn sources_for(c: &Connection, lesson: i64) -> Res<Vec<(String, String)>> {
         .map_err(err)?;
     let out = q.query_map([lesson], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err);
     out
+}
+
+/// The material a lesson is taught from: its own and its folders', as (id, name, words, file, part labels).
+pub fn material_index(c: &Connection, lesson: i64) -> Res<Vec<(i64, String, i64, String, Vec<String>)>> {
+    let mut q = c
+        .prepare_cached(&format!("{MATERIAL} SELECT s.id, s.name, s.words, s.file, (SELECT json_group_array(label) FROM (SELECT label FROM parts WHERE source_id = s.id ORDER BY seq)) FROM mine s ORDER BY s.id"))
+        .map_err(err)?;
+    let out = q
+        .query_map([lesson], |r| {
+            let labels: String = r.get(4)?;
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, serde_json::from_str(&labels).unwrap_or_default()))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err);
+    out
+}
+
+/// The lesson's material, for the recursive queries below.
+const MATERIAL: &str = "WITH RECURSIVE up(id) AS (
+    SELECT folder_id FROM lessons WHERE id = ?1
+    UNION ALL SELECT f.parent_id FROM folders f JOIN up ON f.id = up.id WHERE f.parent_id IS NOT NULL),
+  mine AS (SELECT * FROM sources WHERE lesson_id = ?1 OR folder_id IN (SELECT id FROM up))";
+
+/// Full-text search over the lesson's material: the best parts, with a snippet each.
+pub fn search_parts(c: &Connection, lesson: i64, query: &str) -> Res<Vec<Value>> {
+    // quote each word so FTS syntax in the query can't fail it; any word may match, best first
+    let q: Vec<String> = query.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', ""))).collect();
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    rows(
+        c,
+        &format!("{MATERIAL} SELECT s.id, s.name, p.seq, p.label, snippet(parts_fts, 0, '**', '**', ' … ', 40)
+           FROM parts_fts JOIN parts p ON p.id = parts_fts.rowid JOIN mine s ON s.id = p.source_id
+           WHERE parts_fts MATCH ?2 ORDER BY rank LIMIT 6"),
+        params![lesson, q.join(" OR ")],
+        |r| Ok(json!({ "material": r.get::<_, i64>(0)?, "name": r.get::<_, String>(1)?, "part": r.get::<_, i64>(2)?,
+                       "label": r.get::<_, String>(3)?, "snippet": r.get::<_, String>(4)? })),
+    )
+}
+
+/// One part of the lesson's material, with how many parts that material has.
+pub fn read_part(c: &Connection, lesson: i64, source: i64, part: i64) -> Res<Option<(String, String, String, i64)>> {
+    c.query_row(
+        &format!("{MATERIAL} SELECT s.name, p.label, p.body, (SELECT COUNT(*) FROM parts WHERE source_id = s.id)
+           FROM parts p JOIN mine s ON s.id = p.source_id WHERE s.id = ?2 AND p.seq = ?3"),
+        params![lesson, source, part],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
+    .map_err(err)
+}
+
+/// Files written for material in `folder` and everything beneath it.
+pub fn files_within(c: &Connection, folder: i64) -> Res<Vec<String>> {
+    let mut q = c
+        .prepare_cached(
+            "WITH RECURSIVE down(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM folders f JOIN down ON f.parent_id = down.id)
+             SELECT file FROM sources WHERE folder_id IN (SELECT id FROM down)
+                OR lesson_id IN (SELECT id FROM lessons WHERE folder_id IN (SELECT id FROM down))",
+        )
+        .map_err(err)?;
+    let out = q.query_map([folder], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err);
+    out
+}
+
+/// The top-level folder (the subject) that `folder` sits in.
+pub fn subject_of(c: &Connection, folder: i64) -> Res<String> {
+    c.query_row(
+        "WITH RECURSIVE up(id, parent, name) AS (SELECT id, parent_id, name FROM folders WHERE id = ?1
+           UNION ALL SELECT f.id, f.parent_id, f.name FROM folders f JOIN up ON f.id = up.parent)
+         SELECT name FROM up WHERE parent IS NULL",
+        [folder],
+        |r| r.get(0),
+    )
+    .map_err(err)
 }
 
 /// True if `target` is `folder` itself or somewhere beneath it (moving `folder` there would make a loop).
@@ -312,6 +445,41 @@ mod tests {
         .unwrap();
         let names: Vec<String> = sources_for(&c, 1).unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["top", "mid", "own"]);
+    }
+
+    #[test]
+    fn material_is_searched_and_read_only_within_the_lesson() {
+        let c = mem();
+        c.execute_batch(
+            "INSERT INTO folders (id, parent_id, name) VALUES (1, NULL, 'Somali'), (2, NULL, 'Other');
+             INSERT INTO lessons (id, folder_id, title, updated) VALUES (1, 1, 'Greetings', 0);
+             INSERT INTO sources (id, folder_id, name, body, words) VALUES (1, 1, 'Grammar', '', 0), (2, 2, 'Elsewhere', '', 0);",
+        )
+        .unwrap();
+        add_parts(&c, 1, "[page 4]\n\n# Greetings\n\nIska warran means how are you.").unwrap();
+        add_parts(&c, 2, "Iska warran appears here too.").unwrap();
+        let hits = search_parts(&c, 1, "warran \"AND").unwrap(); // stray FTS syntax is harmless
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["label"], "p. 4 · Greetings");
+        assert!(read_part(&c, 1, 1, 1).unwrap().unwrap().2.contains("how are you"));
+        assert!(read_part(&c, 1, 2, 1).unwrap().is_none(), "another subject's material is out of reach");
+        assert_eq!(material_index(&c, 1).unwrap()[0].4, ["p. 4 · Greetings"]);
+        c.execute("DELETE FROM sources WHERE id = 1", []).unwrap();
+        assert!(search_parts(&c, 1, "warran").unwrap().is_empty());
+    }
+
+    #[test]
+    fn loose_lessons_become_subjects_with_their_full_title() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+        let long = "Teach me about electrical engineering, I'm starting from scratch please";
+        let cut: String = long.chars().take(60).collect();
+        c.execute("INSERT INTO lessons (id, title, updated) VALUES (1, ?1, 0)", [&cut]).unwrap();
+        c.execute("INSERT INTO messages VALUES (1, 0, ?1)", [json!({ "role": "user", "content": long }).to_string()]).unwrap();
+        migrate(&c).unwrap();
+        let (title, folder): (String, String) = c.query_row("SELECT l.title, f.name FROM lessons l JOIN folders f ON f.id = l.folder_id", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((title.as_str(), folder.as_str()), (long, long));
     }
 
     #[test]

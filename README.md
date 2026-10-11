@@ -5,10 +5,23 @@ A personal tutor on your computer. Tell it what you want to learn, or give it yo
 
 ## How it teaches
 
-1. It asks a few quick questions to find out what you already know.
-2. It shows you a plan for getting from there to your goal.
-3. It explains one idea at a time and checks each one with a short quiz, keeping notes on what you've
-   got and what you missed.
+Each subject (Somali, electrical engineering, a certification) holds its lessons and its material. Add a
+textbook, slides, notes or a video transcript once: drop the files onto the window. Every lesson in that
+subject is taught from them, and they're saved as plain Markdown in `~/rlearn/<subject>/`.
+
+A lesson moves through four phases. The chat always shows which one you're in and why, and you can switch
+at any time:
+
+1. **Probe.** A few quick questions find where your knowledge ends. Getting everything right means the
+   questions were too easy, so it keeps going until it finds the edge.
+2. **Plan.** A map of the ideas between what you know and your goal, in the order they build on each other.
+   You approve it before anything is taught.
+3. **Teach.** One idea at a time: why you need it, how it follows from what you already know, then a quick
+   check. Every question is followed by an explanation and a new angle, never a pile of questions.
+4. **Review.** Questions across everything covered, to find what needs another pass.
+
+New to a subject? Start from scratch. Already familiar? Start with a test. The default is to find out
+what you know first, because teaching lands best just past the edge of what you already understand.
 
 ## Get started
 

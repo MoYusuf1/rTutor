@@ -1,6 +1,7 @@
 mod bridge;
 mod db;
 mod llm;
+mod material;
 pub mod mcp;
 mod pty;
 
@@ -135,20 +136,38 @@ fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
     Ok(format!("{PROMPT}{}", material(c, lesson)?))
 }
 
-/// The learner's attached material for a lesson, as a prompt section ("" when there is none).
+/// The learner's attached material for a lesson, as a prompt section ("" when there is none). Small material
+/// goes in whole; a textbook goes in as its contents, and the tutor reads parts with its tools.
 fn material(c: &Connection, lesson: i64) -> Res<String> {
-    let sources = db::sources_for(c, lesson)?;
-    if sources.is_empty() {
+    const INLINE: i64 = 12_000; // words
+    let index = db::material_index(c, lesson)?;
+    if index.is_empty() {
         return Ok(String::new());
     }
-    let mut s = String::new();
-    s.push_str(
-        "\n\n# The learner's material\n\nThe learner attached the material below. Internalize it before you start: it defines \
-         what this lesson covers. Probe the learner against its content, build the plan from its ideas, and teach in its \
-         terms. When you rely on a specific part, say where it comes from.\n",
+    let mut s = String::from(
+        "\n\n# The learner's material\n\nThe learner added the material below for this subject. It defines what the lessons \
+         cover: probe against it, plan from its ideas, teach in its terms, and say where things come from (material and \
+         page or part). Never ask the learner to paste it again.\n",
     );
-    for (name, body) in sources {
-        s.push_str(&format!("\n<source name=\"{}\">\n{body}\n</source>\n", name.replace('"', "'")));
+    if index.iter().map(|m| m.2).sum::<i64>() <= INLINE {
+        for (name, body) in db::sources_for(c, lesson)? {
+            s.push_str(&format!("\n<source name=\"{}\">\n{body}\n</source>\n", name.replace('"', "'")));
+        }
+        return Ok(s);
+    }
+    s.push_str(
+        "\nIt is too long to include here, so these are its contents. Read the part you are about to teach with \
+         `read_material` before you teach it, and use `search_material` to find where a topic is covered. Base \
+         explanations and quizzes on what the material actually says.\n",
+    );
+    for (id, name, words, file, labels) in index {
+        s.push_str(&format!("\n## Material {id}: {name} ({words} words, {} parts)\n", labels.len()));
+        if !file.is_empty() {
+            s.push_str(&format!("File: {file}\n"));
+        }
+        for (i, label) in labels.iter().enumerate() {
+            s.push_str(&format!("{}. {label}\n", i + 1));
+        }
     }
     Ok(s)
 }
@@ -366,12 +385,26 @@ fn create_folder(store: State<Store>, parent: Option<i64>, name: String) -> Res<
 
 #[tauri::command]
 fn rename_folder(store: State<Store>, id: i64, name: String) -> Res<()> {
-    exec(&*store.db()?, "UPDATE folders SET name = ?2 WHERE id = ?1", params![id, name]).map(drop)
+    let c = store.db()?;
+    let (old, top): (String, bool) = c.query_row("SELECT name, parent_id IS NULL FROM folders WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
+    exec(&c, "UPDATE folders SET name = ?2 WHERE id = ?1", params![id, name])?;
+    if top {
+        material::rename_subject(&old, &name);
+        // the files moved with their folder
+        let (from, to) = (material::subject_dir(&old).display().to_string(), material::subject_dir(&name).display().to_string());
+        exec(&c, "UPDATE sources SET file = ?2 || substr(file, length(?1) + 1) WHERE file LIKE ?1 || '%'", params![from, to])?;
+    }
+    store.forget(None);
+    Ok(())
 }
 
 #[tauri::command]
 fn delete_folder(store: State<Store>, id: i64) -> Res<()> {
-    exec(&*store.db()?, "DELETE FROM folders WHERE id = ?1", [id])?; // cascades to everything inside
+    let c = store.db()?;
+    let files = db::files_within(&c, id)?;
+    exec(&c, "DELETE FROM folders WHERE id = ?1", [id])?; // cascades to everything inside
+    material::remove_files(&files);
+    drop(c);
     store.forget(None);
     *store.open.lock().map_err(err)? = Open::default();
     Ok(())
@@ -399,73 +432,97 @@ fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) ->
 
 // ---------- sources: material the tutor teaches from ----------
 
-/// Text from a file, as compact as it can be without losing content.
-fn extract(path: &std::path::Path) -> Res<String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let raw = if ext == "pdf" {
-        let p = path.to_owned();
-        // the PDF parser can panic on malformed files; keep that from taking the app down
-        std::panic::catch_unwind(move || pdf_extract::extract_text(&p))
-            .map_err(|_| "This PDF couldn't be read.".to_owned())?
-            .map_err(err)?
-    } else {
-        std::fs::read_to_string(path).map_err(|_| "Only text, Markdown, subtitle and PDF files can be added.".to_owned())?
-    };
-    let subtitles = matches!(ext.as_str(), "srt" | "vtt");
-    let mut out = String::with_capacity(raw.len());
-    let mut blank = 0;
-    for line in raw.lines().map(str::trim_end) {
-        // subtitle files: drop cue numbers, timestamps and the header, keep the words
-        if subtitles && (line.contains("-->") || line == "WEBVTT" || line.trim().parse::<u32>().is_ok()) {
-            continue;
-        }
-        blank = if line.trim().is_empty() { blank + 1 } else { 0 };
-        if blank < 2 {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    Ok(out.trim().to_owned())
-}
-
-/// Opens the file picker and returns the extracted text (stored by `add_source`).
-#[tauri::command]
-async fn pick_source(app: tauri::AppHandle) -> Res<Option<Value>> {
-    let Some(file) = app.dialog().file().add_filter("Material", &["pdf", "txt", "md", "srt", "vtt"]).blocking_pick_file() else {
-        return Ok(None);
-    };
-    let path = file.into_path().map_err(err)?;
+fn read_material(path: std::path::PathBuf) -> Res<Value> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let text = tauri::async_runtime::spawn_blocking(move || extract(&path)).await.map_err(err)??;
+    let text = material::extract(&path)?;
     if text.is_empty() {
         return Err(format!("No text found in {name}. Scanned PDFs need OCR first."));
     }
     let words = text.split_whitespace().count();
-    Ok(Some(json!({ "name": name, "text": text, "words": words })))
+    Ok(json!({ "name": name, "text": text, "words": words }))
 }
 
+/// Opens the file picker and returns each file's extracted text (stored by `add_source`).
+#[tauri::command]
+async fn pick_source(app: tauri::AppHandle) -> Res<Vec<Value>> {
+    let Some(files) = app.dialog().file().add_filter("Material", &["pdf", "txt", "md", "srt", "vtt"]).blocking_pick_files() else {
+        return Ok(vec![]);
+    };
+    let paths: Vec<_> = files.into_iter().filter_map(|f| f.into_path().ok()).collect();
+    tauri::async_runtime::spawn_blocking(move || paths.into_iter().map(read_material).collect()).await.map_err(err)?
+}
+
+/// A file dropped onto the window.
+#[tauri::command]
+async fn read_source(path: String) -> Res<Value> {
+    tauri::async_runtime::spawn_blocking(move || read_material(path.into())).await.map_err(err)?
+}
+
+/// Stores material: split into searchable parts, and written as a Markdown file in its subject's folder.
 #[tauri::command]
 fn add_source(store: State<Store>, folder: Option<i64>, lesson: Option<i64>, name: String, text: String) -> Res<i64> {
     let c = store.db()?;
+    let home = match (folder, lesson) {
+        (Some(f), _) => Some(f),
+        (None, Some(l)) => c.query_row("SELECT folder_id FROM lessons WHERE id = ?1", [l], |r| r.get(0)).map_err(err)?,
+        _ => None,
+    };
+    // ponytail: a material file that can't be written (read-only home, odd name) just means no file; the parts still work
+    let file = match home {
+        Some(f) => material::write_file(&db::subject_of(&c, f)?, &name, &text).map(|p| p.display().to_string()).unwrap_or_default(),
+        None => String::new(),
+    };
     let words = text.split_whitespace().count() as i64;
-    exec(&c, "INSERT INTO sources (folder_id, lesson_id, name, body, words) VALUES (?1, ?2, ?3, ?4, ?5)", params![folder, lesson, name, text, words])?;
+    let tx = c.unchecked_transaction().map_err(err)?;
+    exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![folder, lesson, name, text, words, file])?;
+    let id = tx.last_insert_rowid();
+    db::add_parts(&tx, id, &text).map_err(err)?;
+    tx.commit().map_err(err)?;
     store.forget(None);
-    Ok(c.last_insert_rowid())
+    Ok(id)
 }
 
 #[tauri::command]
 fn get_source(store: State<Store>, id: i64) -> Res<Value> {
     store
         .db()?
-        .query_row("SELECT name, body FROM sources WHERE id = ?1", [id], |r| Ok(json!({ "name": r.get::<_, String>(0)?, "body": r.get::<_, String>(1)? })))
+        .query_row("SELECT name, body, file FROM sources WHERE id = ?1", [id], |r| {
+            Ok(json!({ "name": r.get::<_, String>(0)?, "body": r.get::<_, String>(1)?, "file": r.get::<_, String>(2)? }))
+        })
         .map_err(err)
 }
 
 #[tauri::command]
 fn delete_source(store: State<Store>, id: i64) -> Res<()> {
-    exec(&*store.db()?, "DELETE FROM sources WHERE id = ?1", [id])?;
+    let c = store.db()?;
+    let file: Option<String> = c.query_row("SELECT file FROM sources WHERE id = ?1", [id], |r| r.get(0)).optional().map_err(err)?;
+    exec(&c, "DELETE FROM sources WHERE id = ?1", [id])?;
+    material::remove_files(&file.into_iter().collect::<Vec<_>>());
     store.forget(None);
     Ok(())
+}
+
+/// The tutor's `search_material` tool.
+#[tauri::command]
+fn material_search(store: State<Store>, lesson: i64, query: String) -> Res<String> {
+    let hits = db::search_parts(&*store.db()?, lesson, &query)?;
+    if hits.is_empty() {
+        return Ok("Nothing in the material matches. Try other words, or read the parts listed in its contents.".into());
+    }
+    Ok(hits
+        .iter()
+        .map(|h| format!("material {} \"{}\", part {} ({}):\n{}", h["material"], h["name"].as_str().unwrap_or_default(), h["part"], h["label"].as_str().unwrap_or_default(), h["snippet"].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+/// The tutor's `read_material` tool.
+#[tauri::command]
+fn material_read(store: State<Store>, lesson: i64, material: i64, part: i64) -> Res<String> {
+    match db::read_part(&*store.db()?, lesson, material, part)? {
+        Some((name, label, body, total)) => Ok(format!("\"{name}\", part {part} of {total} ({label}):\n\n{body}")),
+        None => Err(format!("This lesson has no material {material} with a part {part}.")),
+    }
 }
 
 /// What the status strip shows: lesson totals, the latest turn, and the provider's last known limits.
@@ -511,7 +568,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
-            get_source, delete_source, get_settings, save_settings, stats, set_state,
+            get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command,
             bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
@@ -521,8 +578,6 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::extract;
-
     #[test]
     fn history_is_cut_in_steps_at_a_learner_turn() {
         use serde_json::json;
@@ -538,22 +593,4 @@ mod tests {
         assert_eq!(super::cut_point(&msgs, &tail, 0), 4); // keeps the latest turns that fit
     }
 
-    #[test]
-    fn subtitles_keep_only_the_words() {
-        let dir = std::env::temp_dir().join("learn-extract-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("talk.srt");
-        std::fs::write(&f, "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n\n\n2\n00:00:03,000 --> 00:00:04,000\nGeneral idea\n").unwrap();
-        assert_eq!(extract(&f).unwrap(), "Hello there\n\nGeneral idea"); // runs of blank lines collapse to one
-    }
-
-    /// Timing on a real file: SOURCE=/path/to/file.pdf cargo test -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn extract_real_file() {
-        let path = std::env::var("SOURCE").unwrap();
-        let t = std::time::Instant::now();
-        let text = extract(std::path::Path::new(&path)).unwrap();
-        println!("{} words, {} bytes in {:?}", text.split_whitespace().count(), text.len(), t.elapsed());
-    }
 }

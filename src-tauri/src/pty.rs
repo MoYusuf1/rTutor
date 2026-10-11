@@ -60,6 +60,9 @@ pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, col
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
+    if !cwd.is_empty() {
+        let _ = std::fs::create_dir_all(&cwd); // e.g. ~/rlearn on first use
+    }
     if std::path::Path::new(&cwd).is_dir() {
         cmd.cwd(cwd);
     } else if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {

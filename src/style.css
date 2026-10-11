@@ -44,15 +44,18 @@ svg { display: block; flex-shrink: 0; }
 .wide { width: 100%; padding: 9px; margin-top: 6px; }
 
 /* ---------- sidebar ---------- */
-#sidebar { position: relative; width: 264px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--line); }
+/* The sidebar is the same paper as the lesson and chat, set apart by a hairline, and resizable like the chat. */
+:root { --side-w: 272px; }
+#sidebar { position: relative; width: var(--side-w); flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg); border-right: 1px solid var(--line); }
+#side-grip { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; z-index: 7; }
+#side-grip:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px 5px, transparent 5px); }
 body.collapsed #sidebar { display: none; }
 body.resizing { user-select: none; cursor: col-resize; }
-.brand { display: flex; align-items: center; gap: 8px; padding: 12px 10px 4px 16px; }
-.logo { flex: 1; font: 700 23px/1 var(--read); color: var(--accent); }
 .floating { position: fixed; top: 10px; left: 10px; z-index: 5; background: var(--sidebar); border: 1px solid var(--line); }
 body:not(.collapsed) .floating { display: none; }
 
-.actions { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; }
+.actions { display: flex; flex-direction: column; gap: 1px; padding: 10px 8px 6px; }
+#collapse { align-self: flex-end; margin-bottom: 4px; }
 .act { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 8px; color: var(--text); text-align: left; }
 .act:hover { background: var(--hover); }
 .act svg { color: var(--muted); }
@@ -62,7 +65,7 @@ body:not(.collapsed) .floating { display: none; }
 #side-scroll section { margin-top: 14px; }
 #side-scroll h3 { display: flex; align-items: center; justify-content: space-between; height: 24px; margin: 0 0 2px; padding: 0 4px 0 10px; font-size: 12px; font-weight: 500; color: var(--faint); }
 .mini { width: 22px; height: 22px; opacity: 0; } h3:hover .mini, .mini:focus-visible { opacity: 1; }
-#recents { min-height: 28px; border-radius: 8px; }
+.empty { margin: 4px 10px; font-size: 13px; color: var(--faint); }
 
 .row { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border-radius: 8px; cursor: pointer; color: var(--text); white-space: nowrap; user-select: none; }
 .row:hover { background: var(--hover); }
@@ -116,7 +119,7 @@ body:not(.collapsed) .floating { display: none; }
 
 /* bottom panel: terminals */
 :root { --drawer-h: 300px; }
-#drawer { position: fixed; left: 264px; right: 0; bottom: 0; height: var(--drawer-h); z-index: 4; display: flex; flex-direction: column; background: var(--sidebar); border-top: 1px solid var(--line); }
+#drawer { position: fixed; left: var(--side-w); right: 0; bottom: 0; height: var(--drawer-h); z-index: 4; display: flex; flex-direction: column; background: var(--sidebar); border-top: 1px solid var(--line); }
 body.collapsed #drawer { left: 0; }
 body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--drawer-h)); }
 #drawer-grip { position: absolute; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; }
@@ -149,7 +152,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 
 /* ---------- start ---------- */
 #start { flex: 1; display: grid; place-items: center; padding: 32px; }
-#start-form { width: min(660px, 100%); }
+#start-form { width: min(860px, 100%); }
 .crumb { color: var(--muted); font-size: 13px; margin-bottom: 6px; min-height: 20px; }
 #start h1 { font: 600 34px/1.2 var(--read); margin: 0 0 18px; letter-spacing: -0.01em; }
 .start-box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 14px 14px 10px; }
@@ -159,6 +162,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 .start-foot .chips { flex: 1; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#lesson-materials .chip { cursor: pointer; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 8px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font: 500 12.5px var(--ui); max-width: 260px; }
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip small { color: var(--muted); font-weight: 400; }
@@ -166,18 +170,37 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 .chip button { color: inherit; opacity: 0.7; border-radius: 4px; }
 .chip button:hover { opacity: 1; }
 
+#start { overflow-y: auto; }
+.gears { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+.gear { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-align: left; transition: border-color 0.15s; }
+.gear b { font-weight: 600; font-size: 14px; }
+.gear span { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.gear:hover { border-color: var(--faint); }
+.gear[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.gear[aria-checked="true"] b { color: var(--accent); }
+#library { margin-top: 34px; }
+#library h2 { font: 600 13px var(--ui); color: var(--muted); margin: 0 0 8px; }
+.mat { display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.mat .name { flex: 1; min-width: 0; text-align: left; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mat .name:hover { color: var(--accent); }
+.mat small { font-size: 12px; color: var(--faint); white-space: nowrap; }
+.add { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 13.5px; }
+.add:hover { border-color: var(--accent); color: var(--accent); }
+#dropping { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 80%, transparent); border: 2px dashed var(--accent); pointer-events: none; }
+#dropping p { font: 600 18px var(--ui); color: var(--accent); }
+
 /* ---------- lesson ---------- */
 :root { --chat-w: 420px; }
 #lesson { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) min(var(--chat-w), calc(100% - 360px)); }
 #canvas, #doc { overflow-y: auto; padding: 44px 56px 120px; }
 #doc { flex: 1; }
-.canvas-head { max-width: 760px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 10px; }
-#title, #doc-title { font: 650 32px/1.2 var(--read); margin: 0; letter-spacing: -0.01em; }
+.canvas-head { max-width: 900px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 10px; }
+#title, #doc-title { font: 650 32px/1.2 var(--read); margin: 0; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .notes { font: 13.5px/1.55 var(--ui); color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
 .notes summary { cursor: pointer; font-weight: 600; list-style: none; }
 .notes summary::before { content: "▸ "; } .notes[open] summary::before { content: "▾ "; }
 .notes .md { margin-top: 6px; color: var(--text); } .notes .md > :last-child { margin-bottom: 0; }
-#canvas-body, #doc-body { max-width: 760px; margin: 0 auto; font: 18px/1.7 var(--read); }
+#canvas-body, #doc-body { max-width: 900px; margin: 0 auto; font: 18px/1.7 var(--read); }
 #doc-body pre.plain { white-space: pre-wrap; font: inherit; margin: 24px 0; }
 #canvas-body > * { margin-top: 28px; animation: rise 0.25s ease; }
 #canvas-body h1, #canvas-body h2, #canvas-body h3 { line-height: 1.25; letter-spacing: -0.01em; }
@@ -190,6 +213,13 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 #chat { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--bg); font: 16px/1.65 var(--ui); letter-spacing: -0.015em; }
 #chat-grip { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; }
 #chat-grip:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px 5px, transparent 5px); }
+.phase { padding: 14px 20px 12px; border-bottom: 1px solid var(--line); }
+#steps { display: flex; gap: 4px; }
+.step { flex: 1; padding: 5px 0; border-radius: 8px; font-size: 13px; color: var(--muted); letter-spacing: 0; position: relative; }
+.step:hover { background: var(--hover); color: var(--text); }
+.step[aria-checked="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+#phase-why { margin: 8px 2px 0; font-size: 13px; line-height: 1.5; color: var(--muted); letter-spacing: 0; }
+#phase-why:empty { display: none; }
 #log { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 22px 12px; display: flex; flex-direction: column; gap: 18px; scrollbar-gutter: stable; }
 .msg { flex-shrink: 0; max-width: 100%; overflow-wrap: anywhere; }
 .msg p { margin: 0.75em 0; }
