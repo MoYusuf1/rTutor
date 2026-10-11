@@ -9,8 +9,11 @@
 <body>
   <aside id="sidebar">
     <div id="side-grip" title="Drag to resize"></div>
-    <nav class="actions">
+    <header class="brand">
+      <span class="wordmark">rlearn</span>
       <button id="collapse" class="icon" data-icon="sidebar" title="Hide sidebar"></button>
+    </header>
+    <nav class="actions">
       <button id="new-subject" class="act"><span data-icon="edit"></span>New subject</button>
       <button id="search-btn" class="act"><span data-icon="search"></span>Search</button>
       <input id="search-input" type="search" aria-label="Search lessons" placeholder="Search lessons" spellcheck="false" hidden>
@@ -53,23 +56,24 @@
   </main>
 
   <main id="lesson" hidden>
+    <button id="sources-btn" class="sources-btn" aria-expanded="false" title="Sources"><span data-icon="doc"></span><span id="sources-count"></span></button>
+    <div id="sources-pop" hidden>
+      <header><h3>Sources</h3><button type="button" id="sources-add" class="icon" data-icon="plus" title="Add material"></button></header>
+      <div id="sources-list"></div>
+    </div>
     <section id="canvas" aria-label="Lesson">
       <header class="canvas-head">
         <h1 id="title"></h1>
-        <div id="lesson-materials" class="chips"></div>
         <details id="notes" class="notes" hidden><summary>Tutor's notes</summary><div id="notes-body"></div></details>
       </header>
       <article id="canvas-body"></article>
     </section>
     <aside id="chat" aria-label="Chat">
       <div id="chat-grip" title="Drag to resize"></div>
-      <header class="phase">
-        <div id="steps" role="radiogroup" aria-label="Phase"></div>
-        <p id="phase-why"></p>
-      </header>
       <div id="log" aria-live="polite"></div>
       <div id="suggest" class="suggest"></div>
       <form id="composer">
+        <button type="button" id="plus" class="icon" data-icon="plus" title="Add material to this subject"></button>
         <textarea id="input" rows="1" aria-label="Message" placeholder="Ask your tutor…"></textarea>
         <button class="send" data-icon="send" aria-label="Send"></button>
       </form>

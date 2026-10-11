@@ -18,6 +18,7 @@ struct Store {
     db: Mutex<Connection>,
     open: Mutex<Open>,
     http: reqwest::Client, // one pooled client: connections are reused across turns
+    stops: Mutex<std::collections::HashMap<i64, futures_util::future::AbortHandle>>, // running API turns, by lesson
 }
 
 /// The lesson currently being taught, kept in memory so each turn only appends.
@@ -140,11 +141,17 @@ fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
 /// goes in whole; a textbook goes in as its contents, and the tutor reads parts with its tools.
 fn material(c: &Connection, lesson: i64) -> Res<String> {
     const INLINE: i64 = 12_000; // words
+    let notes = db::subject_of_lesson(c, lesson)?.map(|s| s.2).unwrap_or_default();
+    let mut s = if notes.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n# Your notes on this subject\n\nYou wrote these in earlier lessons (`subject_notes`). Rely on them instead of re-reading the material.\n\n{notes}\n")
+    };
     let index = db::material_index(c, lesson)?;
     if index.is_empty() {
-        return Ok(String::new());
+        return Ok(s);
     }
-    let mut s = String::from(
+    s.push_str(
         "\n\n# The learner's material\n\nThe learner added the material below for this subject. It defines what the lessons \
          cover: probe against it, plan from its ideas, teach in its terms, and say where things come from (material and \
          page or part). Never ask the learner to paste it again.\n",
@@ -158,8 +165,15 @@ fn material(c: &Connection, lesson: i64) -> Res<String> {
     s.push_str(
         "\nIt is too long to include here, so these are its contents. Read the part you are about to teach with \
          `read_material` before you teach it, and use `search_material` to find where a topic is covered. Base \
-         explanations and quizzes on what the material actually says.\n",
+         explanations and quizzes on what the material actually says. Never read it all: a few parts per step is plenty.\n",
     );
+    if notes.trim().is_empty() {
+        s.push_str(
+            "\nYou have no notes on this subject yet. Before the first lesson goes far, skim these contents (and search a \
+             little) to map which source covers what, which are reference (dictionaries) and which teach in order, and save \
+             that map with `subject_notes`. Every later lesson starts from it.\n",
+        );
+    }
     for (id, name, words, file, labels) in index {
         s.push_str(&format!("\n## Material {id}: {name} ({words} words, {} parts)\n", labels.len()));
         if !file.is_empty() {
@@ -170,6 +184,28 @@ fn material(c: &Connection, lesson: i64) -> Res<String> {
         }
     }
     Ok(s)
+}
+
+/// The stop button during an API turn: drops the stream; the reply so far is discarded.
+#[tauri::command]
+fn stop_turn(store: State<Store>, lesson: i64) -> Res<()> {
+    if let Some(stop) = store.stops.lock().map_err(err)?.remove(&lesson) {
+        stop.abort();
+    }
+    Ok(())
+}
+
+/// The tutor's notes on a whole subject: what its material covers and where, and what the learner has shown
+/// across lessons. Kept in the database and as notes.md in the subject's folder, and given to every lesson.
+#[tauri::command]
+fn set_subject_notes(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
+    let c = store.db()?;
+    let (id, name, _) = db::subject_of_lesson(&c, lesson)?.ok_or("This lesson isn't in a subject.")?;
+    exec(&c, "UPDATE folders SET notes = ?2 WHERE id = ?1", params![id, markdown])?;
+    let dir = material::subject_dir(&name);
+    let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("notes.md"), format!("# {name}: tutor's notes\n\n{markdown}\n")));
+    store.forget(None);
+    Ok(())
 }
 
 /// What a terminal agent is told the first time it teaches a lesson: the lesson so far, so it continues instead of
@@ -270,7 +306,12 @@ async fn send(
     };
 
     let started = std::time::Instant::now();
-    let mut reply = llm::chat(&store.http, &provider, &key, &system, &messages[from..], &on_event).await?;
+    let (stop, registration) = futures_util::future::AbortHandle::new_pair();
+    store.stops.lock().map_err(err)?.insert(lesson, stop);
+    let turn = futures_util::future::Abortable::new(llm::chat(&store.http, &provider, &key, &system, &messages[from..], &on_event), registration).await;
+    store.stops.lock().map_err(err)?.remove(&lesson);
+    // stopped: the learner's message stays in the history, the half-finished reply doesn't
+    let mut reply = turn.map_err(|_| "Stopped.".to_owned())??;
     reply.usage.ms = started.elapsed().as_millis() as u64;
     let u = &reply.usage;
     llm::log(&on_event, format!(
@@ -472,6 +513,15 @@ fn add_source(store: State<Store>, folder: Option<i64>, lesson: Option<i64>, nam
         Some(f) => material::write_file(&db::subject_of(&c, f)?, &name, &text).map(|p| p.display().to_string()).unwrap_or_default(),
         None => String::new(),
     };
+    let twin: Option<String> = c
+        .prepare_cached("SELECT name FROM sources WHERE folder_id IS ?1 AND lesson_id IS ?2")
+        .and_then(|mut q| q.query_map(params![folder, lesson], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
+        .map_err(err)?
+        .into_iter()
+        .find(|n| material::stem(n) == material::stem(&name));
+    if let Some(twin) = twin {
+        return Err(format!("{name} looks like {twin}, which is already here, so it wasn't added again."));
+    }
     let words = text.split_whitespace().count() as i64;
     let tx = c.unchecked_transaction().map_err(err)?;
     exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![folder, lesson, name, text, words, file])?;
@@ -553,15 +603,37 @@ fn save_settings(store: State<Store>, settings: Value) -> Res<()> {
     exec(&*store.db()?, "INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?1)", [settings.to_string()]).map(drop)
 }
 
+/// Material files written before sources had their own folder move into ~/rlearn/<subject>/sources/.
+fn relocate_sources(c: &Connection) {
+    let files: Vec<(i64, String)> = c
+        .prepare("SELECT id, file FROM sources WHERE file != ''")
+        .and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .unwrap_or_default();
+    for (id, file) in files {
+        if let Some(moved) = material::into_sources(&file) {
+            let _ = c.execute("UPDATE sources SET file = ?2 WHERE id = ?1", params![id, moved]);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // one window: opening rlearn again (from the launcher, or an agent) brings it forward instead
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(w) = app.webview_windows().into_values().next() {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::Term::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
-            app.manage(Store { db: Mutex::new(db::open(&dir.join("rlearn.db"))?), open: Mutex::default(), http: reqwest::Client::new() });
+            let c = db::open(&dir.join("rlearn.db"))?;
+            relocate_sources(&c);
+            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())
         })
@@ -570,7 +642,7 @@ pub fn run() {
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command,
-            bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
+            stop_turn, set_subject_notes, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");

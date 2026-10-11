@@ -181,12 +181,9 @@ function follow(node) {
   if (s.scrollHeight - s.scrollTop - s.clientHeight < 200) s.scrollTop = s.scrollHeight;
 }
 const log = () => $("#log");
-const thinkingNode = el("div", "thinking");
-thinkingNode.append(el("span", "dots"), el("span", "", "Thinking…"));
-thinkingNode.firstChild.append(el("i"), el("i"), el("i"));
-/** Adds to the chat, always above the "Thinking…" line. */
+/** Adds to the chat, always above the live "Thinking…" block. */
 function chatNode(node) {
-  log().insertBefore(node, thinkingNode.parentNode === log() ? thinkingNode : null);
+  log().insertBefore(node, work?.node.parentNode === log() ? work.node : null);
   log().scrollTop = log().scrollHeight;
   return node;
 }
@@ -194,11 +191,46 @@ function say(text, who = "bot") {
   chatNode(el("div", `msg ${who}`)).append(md(text));
 }
 const note = (text) => chatNode(el("div", "meta", text));
+// While the tutor works, a collapsible "Thinking…" block shows what it is doing: its reasoning (API models
+// that share it) and each step (searching the material, writing on the canvas). Afterwards it folds into
+// "Thought for 12s". Terminal agents show their full reasoning in their own terminal.
+let work = null; // { node, body, label, started, steps }
+
 function thinking(on) {
-  if (on && thinkingNode.parentNode !== log()) {
-    log().append(thinkingNode);
+  if (on && !work) {
+    const node = el("details", "work");
+    const summary = el("summary");
+    const dots = el("span", "dots");
+    dots.append(el("i"), el("i"), el("i"));
+    const label = el("span", "", "Thinking…");
+    summary.append(dots, label);
+    const body = el("div", "work-body");
+    node.append(summary, body);
+    node.open = true; // open while it works, folded once it's done
+    log().append(node);
     log().scrollTop = log().scrollHeight;
-  } else if (!on) thinkingNode.remove();
+    work = { node, body, label, started: Date.now(), steps: 0 };
+  } else if (!on && work) {
+    const w = work;
+    work = null;
+    if (!w.steps && !w.body.textContent.trim()) w.node.remove();
+    else {
+      w.node.classList.add("done");
+      w.node.open = false;
+      w.node.querySelector(".dots").remove();
+      const secs = Math.max(1, Math.round((Date.now() - w.started) / 1000));
+      w.label.textContent = `Thought for ${secs < 60 ? `${secs}s` : `${Math.round(secs / 60)}m`}`;
+    }
+  }
+  setWorking();
+}
+
+/** One line in the live "Thinking…" block. */
+function step(text) {
+  if (!work) return;
+  work.steps++;
+  work.body.append(el("div", "step", text));
+  follow(work.body);
 }
 
 // ---------- data ----------
@@ -257,7 +289,6 @@ function renderSidebar() {
     return frag;
   };
   $("#tree").replaceChildren(build(null));
-  if (!data.folders.length) $("#tree").append(el("p", "empty", "Your subjects and their lessons will be here."));
   const pins = data.lessons.filter((l) => l.bookmarked);
   $("#pinned-sec").hidden = !pins.length;
   $("#pinned").replaceChildren(...pins.map((l) => row("lesson", l)));
@@ -376,7 +407,10 @@ addEventListener("click", (e) => {
   if (!e.target.closest("#pop, #model")) $("#pop").hidden = true;
 });
 addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("#menu").hidden = $("#pop").hidden = true;
+  if (e.key === "Escape") {
+    $("#menu").hidden = $("#pop").hidden = true;
+    toggleSources(false);
+  }
 });
 
 side.addEventListener("contextmenu", (e) => {
@@ -554,12 +588,12 @@ $("#new-subject").onclick = () => startNew(null);
 /** Adds picked or dropped material to `folder`, or holds it for the subject about to be made. */
 async function addMaterial(files, folder) {
   for (const f of files) {
-    if (folder != null) await invoke("add_source", { folder, lesson: null, name: f.name, text: f.text });
-    else pending.push(f);
+    if (folder == null) pending.push(f);
+    else await invoke("add_source", { folder, lesson: null, name: f.name, text: f.text }).catch((e) => alert(e));
   }
   if (folder != null) await refresh();
   if (!$("#start").hidden) renderStart();
-  if (lesson && folder === lesson.folder) $("#lesson-materials").replaceChildren(...lessonChips());
+  if (lesson) renderSources();
 }
 
 async function attach({ folder } = {}) {
@@ -608,13 +642,41 @@ function showNotes(markdown) {
   if (markdown) $("#notes-body").replaceChildren(md(markdown));
 }
 
-function lessonChips() {
-  return materialsFor(lesson.folder, lesson.id).map((s) => {
-    const c = chip(s.name, s.words);
-    c.onclick = () => openSource(s);
-    return c;
-  });
+/** The Sources panel (top right of a lesson): everything the tutor teaches this lesson from. */
+function renderSources() {
+  const list = materialsFor(lesson.folder, lesson.id);
+  $("#sources-count").textContent = list.length || "";
+  $("#sources-list").replaceChildren(
+    ...(list.length ? [] : [el("p", "empty", "Nothing yet. Add a textbook, slides, notes or a transcript, or drop files here.")]),
+    ...list.map((s) => {
+      const r = el("div", "mat");
+      r.innerHTML = icon("doc", 14);
+      const name = el("button", "name", s.name);
+      name.type = "button";
+      name.title = "Open";
+      name.onclick = () => openSource(s);
+      const x = el("button", "icon");
+      x.type = "button";
+      x.innerHTML = icon("x", 12);
+      x.title = "Remove";
+      x.onclick = async () => {
+        if (!x.classList.contains("armed")) return x.classList.add("armed"); // a second click removes it
+        await invoke("delete_source", { id: s.id });
+        await refresh();
+        renderSources();
+      };
+      r.append(name, el("small", "", `${Math.round(s.words / 1000) || "<1"}k words`), x);
+      return r;
+    }),
+  );
 }
+function toggleSources(open = $("#sources-pop").hidden) {
+  $("#sources-pop").hidden = !open;
+  $("#sources-btn").setAttribute("aria-expanded", String(open));
+}
+$("#sources-btn").onclick = () => toggleSources();
+$("#sources-add").onclick = () => attach({ folder: lesson?.folder });
+$("#plus").onclick = () => attach({ folder: lesson?.folder });
 
 function showLesson() {
   show("lesson");
@@ -623,7 +685,7 @@ function showLesson() {
   $("#canvas-body").classList.remove("titled");
   log().replaceChildren();
   showNotes(lesson.state);
-  $("#lesson-materials").replaceChildren(...lessonChips());
+  renderSources();
   renderSuggest();
 }
 
@@ -678,7 +740,7 @@ async function streamTurn(content) {
       const b = e.block;
       const view = { buf: "" };
       if (b.type === "text") view.md = liveMarkdown(log()), view.md.box.className = "msg bot";
-      else if (b.type === "thinking" || b.type === "reasoning") view.thinking = true;
+      else if ((b.type === "thinking" || b.type === "reasoning") && work) view.md = liveMarkdown(work.body);
       else if (b.type === "tool_use" && b.name === "write_lesson") {
         view.md = liveMarkdown($("#canvas-body"));
         view.lesson = true;
@@ -708,6 +770,20 @@ async function streamTurn(content) {
     return { reply, live };
   } finally {
     if (mine === gen) thinking(false);
+  }
+}
+
+/** What the "Thinking…" block says about a tool call, if anything. */
+function describe(name, input = {}) {
+  const src = (id) => data.sources.find((x) => x.id === Number(id))?.name ?? `material ${id}`;
+  switch (name) {
+    case "write_lesson": return `Wrote on the canvas${leadHeading(input.markdown) ? `: ${leadHeading(input.markdown)}` : ""}`;
+    case "update_state": return "Updated its notes on this lesson";
+    case "subject_notes": return "Updated its notes on the subject";
+    case "search_material": return `Searched the material for “${input.query ?? ""}”`;
+    case "read_material": return `Read ${src(input.material)}, part ${input.part}`;
+    case "phase": return PHASES[input.phase] ? `Moved on to ${PHASES[input.phase].toLowerCase()}` : null;
+    default: return null;
   }
 }
 
@@ -813,6 +889,8 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
   const live = t.live.get(id); // the section already streamed onto the canvas, if any
   const fail = (msg) => { live?.box.remove(); return bad(msg); };
   const here = to === lesson;
+  const said = here && describe(name, input);
+  if (said) step(said);
   if (t.truncated) return fail("Your reply was cut off at the output limit before this call finished. Make the step shorter and call the tool again.");
   if (id in t.invalid) return fail(JSON.stringify({ INVALID_JSON: t.invalid[id] }));
 
@@ -844,6 +922,11 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     } catch (e) {
       return bad(String(e));
     }
+  }
+  if (name === "subject_notes") {
+    if (typeof input.markdown !== "string") return bad("subject_notes needs a markdown string.");
+    await invoke("set_subject_notes", { lesson: to.id, markdown: input.markdown });
+    return ok("Subject notes saved. Every lesson in this subject will start from them.");
   }
   if (name === "say") {
     if (typeof input.text !== "string") return bad("say needs text.");
@@ -882,42 +965,22 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
   return bad(`Unknown tool: ${name}`);
 }
 
-// ---------- the lesson's phase: shown, explained, and switchable ----------
+// ---------- the lesson's phase, and shortcuts that fit it ----------
 
-const PHASES = {
-  probe: ["Probe", "A few quick questions to find where your knowledge ends, so teaching starts at the right place."],
-  plan: ["Plan", "Mapping the ideas between what you know and your goal, in the order they build on each other."],
-  teach: ["Teach", "One idea at a time: why it matters, how it follows from what you know, then a quick check."],
-  review: ["Review", "Questions across everything covered so far, to find what needs another pass."],
-};
-const SWITCH = {
-  probe: "Let's switch to probing: find out what I already know.",
-  plan: "Let's switch to planning: show me the plan.",
-  teach: "Let's switch to teaching.",
-  review: "Let's switch to review: test me on what we've covered.",
-};
+const PHASES = { probe: "Probing", plan: "Planning", teach: "Teaching", review: "Reviewing" };
 const SUGGEST = {
-  probe: [["Harder questions", "Ask me harder questions."], ["I've never studied this", "I've never studied this. Stop probing and start from the foundations."]],
+  probe: [["Start teaching", "That's enough questions about what I know. Make the plan and start teaching."], ["Test me instead", "Skip ahead and test me on this."]],
   plan: [["Looks good, start", "The plan looks good. Start teaching."], ["Change the plan", "I'd like to change the plan."]],
-  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Slow down", "Slow down and take smaller steps."]],
-  review: [["Harder", "Make the questions harder."], ["Explain my misses", "Explain the ones I got wrong."]],
+  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."]],
+  review: [["Back to teaching", "Let's go back to teaching the next part."], ["Explain my misses", "Explain the ones I got wrong."]],
 };
 
 function renderSuggest() {
   const phase = lesson?.phase;
-  $("#steps").replaceChildren(
-    ...Object.entries(PHASES).map(([id, [label]]) => {
-      const b = el("button", "step", label);
-      b.type = "button";
-      b.setAttribute("role", "radio");
-      b.setAttribute("aria-checked", String(id === phase));
-      b.title = id === phase ? PHASES[id][1] : `Switch to ${label.toLowerCase()}`;
-      b.onclick = () => id !== phase && send(SWITCH[id]);
-      return b;
-    }),
-  );
-  $("#phase-why").textContent = PHASES[phase]?.[1] ?? "";
+  const now = el("span", "now");
+  now.append(el("i"), PHASES[phase] ?? "");
   $("#suggest").replaceChildren(
+    ...(PHASES[phase] ? [now] : []),
     ...(SUGGEST[phase] ?? []).map(([label, text]) => {
       const b = el("button", "", label);
       b.type = "button";
@@ -999,9 +1062,10 @@ async function runLoop(first) {
       content = reply.stop_reason === "pause_turn" ? null : undefined; // null resumes a paused web search
     }
   } catch (e) {
-    if (mine === gen) note(`Something went wrong: ${e}`);
+    if (mine === gen && e !== "Stopped.") note(`Something went wrong: ${e}`);
   } finally {
     if (apiBusy === me.id) apiBusy = null;
+    setWorking();
     refresh();
   }
 }
@@ -1024,6 +1088,7 @@ agentEvents.onmessage = async (e) => {
     activeAgent = e.active;
     if (agents.find((a) => a.id === activeAgent)?.busy) sentWaiting = false;
     if (lesson?.id === agentLesson) thinking(!openCard && agentThinking());
+    setWorking();
     for (const a of agents) if (!before.has(a.id)) connected(a);
     showWho();
     if (!$("#pop").hidden) renderPop();
@@ -1067,6 +1132,41 @@ function connected(a) {
   box.hidden = false;
 }
 
+// ---------- the send button: a stop button while the tutor works ----------
+
+const working = () =>
+  !!lesson && !openCard && (apiBusy === lesson.id || (usingAgent() && agentLesson === lesson.id && agentThinking()));
+
+function setWorking() {
+  const on = working();
+  const b = $("#composer .send");
+  b.classList.toggle("stop", on);
+  b.innerHTML = on ? '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>' : icon("send", 18);
+  b.setAttribute("aria-label", on ? "Stop" : "Send");
+  b.title = on ? "Stop" : "";
+}
+
+/** The agent's own terminal tab, when it runs in one of rlearn's. */
+const agentTab = (a = agents.find((x) => x.id === activeAgent)) => a && tabs.find((t) => t.cwd === a.cwd);
+const NUDGE = "Call the rlearn next tool now and keep tutoring through rlearn's tools.";
+
+async function stop() {
+  if (!lesson) return;
+  if (apiBusy === lesson.id) await invoke("stop_turn", { lesson: lesson.id }).catch(() => {});
+  if (usingAgent()) {
+    sentWaiting = false;
+    await invoke("agent_stop").catch(() => {});
+    // interrupt it right away (Esc stops Claude Code and Codex mid-thought), then send it back to listening
+    const tab = agentTab();
+    if (tab) {
+      await invoke("term_write", { tab: tab.id, data: "\x1b" }).catch(() => {});
+      setTimeout(() => invoke("term_write", { tab: tab.id, data: `${NUDGE}\r` }).catch(() => {}), 700);
+    }
+  }
+  thinking(false);
+  note("Stopped.");
+}
+
 /** The learner's message (or a shortcut) goes to whoever is teaching. */
 async function send(text) {
   if (!lesson) return;
@@ -1085,6 +1185,16 @@ async function send(text) {
     agentLesson = lesson.id;
     thinking(true);
     await invoke("agent_send", { lesson: lesson.id, text }).catch((e) => { sentWaiting = false; thinking(false); note(String(e)); });
+    // an agent that isn't waiting in `next` won't see the message until it is reminded
+    setTimeout(() => {
+      const a = agents.find((x) => x.id === activeAgent);
+      if (!sentWaiting || !a || a.waiting || a.busy) return;
+      const tab = agentTab(a);
+      if (tab) {
+        step(`Reminded ${agentLook(a.name).label} to pick this up`);
+        invoke("term_write", { tab: tab.id, data: `${NUDGE}\r` }).catch(() => {});
+      } else note(`${agentLook(a.name).label} isn't listening. In its terminal, tell it: ${NUDGE}`);
+    }, 3000);
     return;
   }
   if (apiBusy === lesson.id) return note("One moment, the tutor is still answering.");
@@ -1138,8 +1248,8 @@ function quickStarts() {
   const bin = mcpBin.replace(/'/g, "");
   const json = JSON.stringify({ mcpServers: { rlearn: { command: bin, args: ["--mcp"] } } });
   return [
-    ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --mcp-config '${json}' --allowedTools mcp__rlearn 'Start rlearn'`],
-    ["Codex", "openai", `codex -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' 'Start rlearn'`],
+    ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --mcp-config '${json}' --allowedTools mcp__rlearn 'Call the rlearn next tool now and tutor through it.'`],
+    ["Codex", "openai", `codex -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' 'Call the rlearn next tool now and tutor through it.'`],
   ];
 }
 
@@ -1488,6 +1598,7 @@ $("#start-form").onsubmit = async (e) => {
 };
 $("#composer").onsubmit = (e) => {
   e.preventDefault();
+  if (working() && !$("#input").value.trim()) return stop();
   const text = $("#input").value.trim();
   if (!text || !lesson) return;
   $("#input").value = "";

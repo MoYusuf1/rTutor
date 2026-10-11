@@ -142,6 +142,7 @@ fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
         ("lessons", "compact_from", "INTEGER NOT NULL DEFAULT 0"),
         ("lessons", "compact_state", "TEXT NOT NULL DEFAULT ''"),
         ("sources", "file", "TEXT NOT NULL DEFAULT ''"),
+        ("folders", "notes", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (table, col, decl) in added {
         let has: i64 = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [col], |r| r.get(0))?;
@@ -316,6 +317,19 @@ pub fn files_within(c: &Connection, folder: i64) -> Res<Vec<String>> {
         .map_err(err)?;
     let out = q.query_map([folder], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err);
     out
+}
+
+/// The subject (top-level folder) a lesson belongs to: its id, name and the tutor's notes on it.
+pub fn subject_of_lesson(c: &Connection, lesson: i64) -> Res<Option<(i64, String, String)>> {
+    c.query_row(
+        "WITH RECURSIVE up(id, parent) AS (SELECT f.id, f.parent_id FROM folders f JOIN lessons l ON l.folder_id = f.id WHERE l.id = ?1
+           UNION ALL SELECT f.id, f.parent_id FROM folders f JOIN up ON f.id = up.parent)
+         SELECT f.id, f.name, f.notes FROM up JOIN folders f ON f.id = up.id WHERE up.parent IS NULL",
+        [lesson],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+    .map_err(err)
 }
 
 /// The top-level folder (the subject) that `folder` sits in.

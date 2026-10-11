@@ -6,14 +6,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-const INSTRUCTIONS: &str = "rlearn is a tutoring app on this computer, and you are its tutor. When the user asks you to start \
-rlearn (or to teach), call the rlearn `next` tool and follow what it returns. Then keep going: after every step, call `next` \
-again to wait for the learner. Teach only through rlearn's tools; the learner reads the app, not this terminal.";
+pub const INSTRUCTIONS: &str = "rlearn is a tutoring app that is already open on this computer, and you are its tutor. Don't \
+look for it or launch it, and don't run commands for it: you reach it only through these MCP tools. Call `next` right away and \
+follow what it returns. After every step, call `next` again to wait for the learner. Teach only through rlearn's tools; the \
+learner reads the app, not this terminal.";
 
 fn tools() -> Vec<Value> {
     let mut tools = crate::llm::tools();
     tools.insert(0, json!({ "name": "next",
-        "description": "Wait for the learner's next message in rlearn and return it. Call it to start, and again whenever you have finished responding. The first call also returns how to teach.",
+        "description": "Wait for the learner's next message in rlearn (already open) and return it. Call it first, before anything else, and again whenever you have finished responding. The first call also returns how to teach.",
         "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } }));
     tools.push(json!({ "name": "say",
         "description": "Show a short chat message to the learner in rlearn's chat pane. Use it for conversation, never for lesson content.",
@@ -178,7 +179,7 @@ mod tests {
         assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
         let list = handle(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         let names: Vec<_> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(names, ["next", "write_lesson", "quiz", "update_state", "ask", "search_material", "read_material", "phase", "say"]);
+        assert_eq!(names, ["next", "write_lesson", "quiz", "update_state", "ask", "search_material", "read_material", "subject_notes", "phase", "say"]);
         assert!(list["result"]["tools"][2]["inputSchema"]["properties"]["correct_index"].is_object());
         let bad = handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "nope" })).unwrap();
         assert_eq!(bad["error"]["code"], -32601);

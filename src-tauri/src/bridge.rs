@@ -40,6 +40,9 @@ struct Agent {
     cwd: String,
     cmd: String, // the command line that started it, when known
     busy: bool,
+    waiting: bool, // inside `next`: it will see the learner's message at once
+    #[serde(skip)]
+    stopped: bool, // the learner pressed stop: its next lesson tool call is refused
     #[serde(skip)]
     lesson: i64, // the lesson its latest message came from; its tool calls apply there
     #[serde(skip)]
@@ -109,7 +112,7 @@ fn serve(app: &AppHandle, stream: TcpStream) -> std::io::Result<()> {
             s.seq += 1;
             let id = s.seq;
             let text = |k: &str| hello[k].as_str().unwrap_or_default().to_owned();
-            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, lesson: 0, briefed: HashSet::new() });
+            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, lesson: 0, briefed: HashSet::new() });
             if s.active.is_none() {
                 s.active = Some(id);
             }
@@ -140,7 +143,7 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
         return Err("rlearn restarted. Call next again.".into());
     };
     if tool == "next" {
-        a.busy = false;
+        (a.busy, a.waiting, a.stopped) = (false, true, false);
         bridge.changed(&s);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -149,6 +152,10 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() || !s.agents.iter().any(|a| a.id == agent) {
+                if let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) {
+                    a.waiting = false;
+                }
+                bridge.changed(&s);
                 return Ok("Nothing from the learner yet. Call next again.".into());
             }
             s = bridge.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
@@ -157,7 +164,7 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
         let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rlearn restarted. Call next again.")?;
         let first = a.briefed.is_empty();
         let new_lesson = a.briefed.insert(lesson);
-        (a.lesson, a.busy) = (lesson, true);
+        (a.lesson, a.busy, a.waiting) = (lesson, true, false);
         bridge.changed(&s);
         drop(s);
         let mut out = String::new();
@@ -173,6 +180,9 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
         return Ok(out);
     }
     // a lesson tool: the page runs it and answers with a tool_result
+    if a.stopped {
+        return Err("The learner pressed stop. Drop what you were doing, don't send anything else, and call next to wait for them.".into());
+    }
     let lesson = a.lesson;
     if lesson == 0 {
         return Err("No lesson yet. Call next to get the learner's first message.".into());
@@ -233,6 +243,18 @@ pub fn agent_result(bridge: tauri::State<Bridge>, id: u64, result: Value) {
         *slot = Some(result);
         bridge.cv.notify_all();
     }
+}
+
+/// The learner pressed stop: the active agent's next lesson tool call is refused, and unsent messages are dropped.
+#[tauri::command]
+pub fn agent_stop(bridge: tauri::State<Bridge>) {
+    let mut s = bridge.lock();
+    let active = s.active;
+    s.inbox.clear();
+    if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == active) {
+        (a.stopped, a.busy) = (true, false);
+    }
+    bridge.changed(&s);
 }
 
 #[tauri::command]

@@ -109,9 +109,19 @@ pub fn subject_dir(subject: &str) -> PathBuf {
     PathBuf::from(home).join("rlearn").join(clean(subject))
 }
 
-/// Writes material as Markdown into its subject's folder and returns the path. Never overwrites another file.
+/// ~/rlearn/<subject>/sources: the material itself.
+pub fn sources_dir(subject: &str) -> PathBuf {
+    subject_dir(subject).join("sources")
+}
+
+/// The same file name without its extension, for spotting the PDF and text copies of one book.
+pub fn stem(name: &str) -> String {
+    Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name).trim().to_lowercase()
+}
+
+/// Writes material as Markdown into its subject's sources folder and returns the path. Never overwrites another file.
 pub fn write_file(subject: &str, name: &str, body: &str) -> Res<PathBuf> {
-    let dir = subject_dir(subject);
+    let dir = sources_dir(subject);
     std::fs::create_dir_all(&dir).map_err(err)?;
     let stem = clean(Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name));
     let mut path = dir.join(format!("{stem}.md"));
@@ -123,6 +133,19 @@ pub fn write_file(subject: &str, name: &str, body: &str) -> Res<PathBuf> {
     }
     std::fs::write(&path, format!("# {name}\n\n{body}\n")).map_err(err)?;
     Ok(path)
+}
+
+/// Moves a material file written before sources had their own folder into `sources/`. Returns the new path.
+pub fn into_sources(file: &str) -> Option<String> {
+    let path = Path::new(file);
+    let dir = path.parent()?;
+    if dir.file_name()? == "sources" || !path.is_file() {
+        return None;
+    }
+    let to = dir.join("sources").join(path.file_name()?);
+    std::fs::create_dir_all(to.parent()?).ok()?;
+    std::fs::rename(path, &to).ok()?;
+    Some(to.display().to_string())
 }
 
 /// A renamed subject takes its folder along.
@@ -138,8 +161,8 @@ pub fn remove_files(files: &[String]) {
     for f in files.iter().filter(|f| !f.is_empty()) {
         let path = Path::new(f);
         let _ = std::fs::remove_file(path);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::remove_dir(dir); // fails unless empty
+        for dir in path.ancestors().skip(1).take(2) {
+            let _ = std::fs::remove_dir(dir); // sources/, then the subject: fails unless empty
         }
     }
 }
