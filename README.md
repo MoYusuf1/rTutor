@@ -7,7 +7,7 @@ A personal tutor on your computer. Tell it what you want to learn, or give it yo
 
 Each subject (Somali, electrical engineering, a certification) holds its lessons and its material. Add a
 textbook, slides, notes or a video transcript once: drop the files onto the window. Every lesson in that
-subject is taught from them, and they.re saved as plain Markdown in `~/rlearn/<subject>/sources/`, next to the tutor.s own notes on the subject (`notes.md`), so a new lesson never starts from zero.
+subject is taught from them, and they're saved as plain Markdown in `~/rlearn/<subject>/sources/`, next to the tutor's own notes on the subject (`notes.md`), so a new lesson never starts from zero.
 
 A lesson moves through four phases. The chat always shows which one you're in and why, and you can switch
 at any time:
