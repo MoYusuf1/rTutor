@@ -19,8 +19,11 @@ npm install
 npm run tauri dev
 ```
 
-Click **Model** (bottom left) to choose who teaches you: **Claude Code** or **Codex** use the subscription
-you're already signed into, or paste an API key (NVIDIA, Anthropic, OpenAI and others).
+Your tutor is a coding agent running in rlearn's terminal. Click the terminal button (bottom left), pick a
+folder, and click **Claude Code** or **Codex**: it starts with the subscription you're already signed into and
+takes over the lesson. Close the terminal and the tutor stops. rlearn can start your agent automatically next
+time, and any other agent that speaks MCP works too. Prefer an API key (NVIDIA, Anthropic, OpenAI and others)?
+Click the name at the bottom left.
 
 ## Credits
 
@@ -35,7 +38,7 @@ The repository and releases are private; sign in with an account that has reposi
 Choose `aarch64.dmg` for Apple Silicon, `x64.dmg` for Intel Mac, an `.exe`/`.msi` for Windows x64, or the AppImage for Linux/Arch. A `.deb` is also built for Debian-based systems. API keys and lessons stay
 on your computer. Claude Code and Codex must be installed and signed in separately.
 
-Open **Model**, choose your provider, and click **Test connection**. The check makes a small real
+For an API provider, click the name at the bottom left, then the gear, and click **Test connection**. The check makes a small real
 request and verifies lesson tool calling without adding a lesson. For API providers, enter the exact
 model ID and key first. A key entered for testing is saved in the OS keyring.
 
@@ -51,16 +54,7 @@ npm run test:ui
 
 The UI smoke test uses controlled IPC replies to check grading, free answers, provider errors and
 reopening a quiz without duplicating content. Set `CHROME_PATH` to use an installed Chrome binary.
-The ignored live tests use the signed-in provider and a small amount of subscription usage:
-
-```bash
-cargo build --manifest-path src-tauri/Cargo.toml
-CLI=codex RLEARN_MCP_BIN="$PWD/src-tauri/target/debug/rlearn" cargo test --manifest-path src-tauri/Cargo.toml --lib cli::live -- --ignored --nocapture
-# Replace CLI=codex with CLI=claude-code to test Claude Code.
-```
-
-The two-turn live test verifies lesson and quiz tools, answer feedback, tutor follow-up, saved state,
-and SQLite reload. Build Linux installers with `npm run tauri build -- --bundles appimage,deb`.
+It also drives a lesson the way a terminal agent does. Build Linux installers with `npm run tauri build -- --bundles appimage,deb`.
 
 ## Cross-platform releases
 

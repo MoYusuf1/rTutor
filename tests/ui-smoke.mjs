@@ -3,6 +3,74 @@ import { chromium, webkit } from "playwright";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "vite";
 
+/** A terminal agent powers the lesson: messages go to the bridge, and its tool calls run in the page. */
+async function agentFlow(browser, engine) {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    const state = { lessons: [], sent: [], results: {} };
+    window.__state = state;
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      unregisterCallback: () => {},
+      invoke: async (command, args = {}) => {
+        const lesson = state.lessons.find((l) => l.id === (args.lesson ?? args.id));
+        switch (command) {
+          case "get_settings": return { active: "agent", providers: {} };
+          case "agent_listen": window.__agent = args.onEvent; return;
+          case "mcp_command": return { bin: "/opt/rlearn", home: "/home/learner" };
+          case "tree": return { lessons: state.lessons, folders: [], sources: [] };
+          case "create_lesson": state.lessons.push({ id: 1, title: args.title, folder: null, state: "", sections: [], messages: [], toolResults: {} }); return 1;
+          case "get_lesson": return structuredClone(lesson);
+          case "add_section": lesson.sections.push(args.markdown); return;
+          case "rename_lesson": lesson.title = args.title; return;
+          case "agent_send": state.sent.push(args.text); return;
+          case "agent_result": state.results[args.id] = args.result; return;
+          case "save_settings": case "agent_use": return;
+          default: throw `Unhandled command ${command}`;
+        }
+      },
+    };
+  });
+  await page.goto("http://localhost:1421");
+  const emit = (e) => page.evaluate((e) => { window.__agent.onmessage(e); }, e); // a quiz call settles only once answered
+  await page.locator("#who").getByText("No agent running").waitFor();
+  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: false }], active: 7 });
+  await page.locator("#who").getByText("Claude Code").waitFor();
+  assert.ok(await page.locator("#who-logo svg[fill='#D97757']").count(), "the Claude logo marks the agent");
+  await page.locator("#start-input").fill("Teach me circuits");
+  await page.locator("#start-btn").click();
+  await page.locator(".msg.user").getByText("Teach me circuits").waitFor();
+  await page.locator(".thinking").waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__state.sent), ["Teach me circuits"]);
+  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: true }], active: 7 });
+  await emit({ type: "call", id: 1, agent: 7, lesson: 1, name: "phase", input: { phase: "probe" } });
+  await page.locator("#suggest").getByText("Start teaching").waitFor();
+  await emit({ type: "call", id: 2, agent: 7, lesson: 1, name: "quiz", input: { question: "What carries current?", options: ["Charge", "Voltage"], correct_index: 0, explanation: "Current is moving charge." } });
+  await page.locator(".card.quiz").waitFor();
+  assert.equal(await page.locator(".thinking").count(), 0, "no thinking indicator while waiting on the learner");
+  await page.locator("#input").fill("What is voltage?");
+  await page.locator("#input").press("Enter");
+  await page.waitForFunction(() => window.__state.results[2]);
+  const typed = await page.evaluate(() => window.__state.results[2]);
+  assert.ok(typed.content.includes("What is voltage?") && !typed.is_error, "typing answers the open quiz");
+  await page.locator(".thinking").waitFor();
+  await emit({ type: "call", id: 3, agent: 7, lesson: 1, name: "say", input: { text: "Good question, see the canvas." } });
+  await page.locator(".msg.bot").getByText("Good question, see the canvas.").waitFor();
+  await emit({ type: "call", id: 4, agent: 7, lesson: 1, name: "write_lesson", input: { markdown: "# Voltage\nPush per charge." } });
+  await page.locator("#canvas-body").getByText("Push per charge.").waitFor();
+  await page.locator("#suggest").getByText("Start teaching").click();
+  await page.waitForFunction(() => window.__state.sent.length === 2);
+  assert.match((await page.evaluate(() => window.__state.sent))[1], /start teaching/i);
+  await emit({ type: "agents", agents: [], active: null });
+  await page.locator("#who").getByText("No agent running").waitFor();
+  assert.deepEqual(errors, []);
+  await page.close();
+  console.log(`${engine} UI passed: terminal agent drives the lesson, phase shortcuts, typed quiz answer, thinking state`);
+}
+
 // Exercise the real UI with deterministic IPC replies. Live Rust tests cover provider transport.
 const server = await createServer({ server: { port: 1421, strictPort: true } });
 await server.listen();
@@ -26,11 +94,13 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
         invoke: async (command, args = {}) => {
           const lesson = state.lessons.find((l) => l.id === (args.lesson ?? args.id));
           switch (command) {
-            case "get_settings": return { active: "codex", providers: {} };
+            case "get_settings": return { active: "api", api: "nvidia", providers: { nvidia: { model: "test-model" } } };
             case "save_settings": return;
-            case "has_api_key": return false;
+            case "has_api_key": return true;
+            case "agent_listen": window.__agent = args.onEvent; return;
+            case "mcp_command": return { bin: "/opt/rlearn", home: "/home/learner" };
             case "test_provider":
-              if (args.provider.kind === "openai") throw "Invalid API key";
+              if (args.provider.id === "openai") throw "Invalid API key";
               return "Connected. Lesson tool calling works.";
             case "tree": return { lessons: state.lessons, folders: [], sources: [] };
             case "stats": return {};
@@ -71,6 +141,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     });
     await page.goto("http://localhost:1421");
     await page.locator("#model").click();
+    await page.locator("#pop .api-row .icon").click();
     await page.locator("#p-test").click();
     await page.locator("#p-status").getByText("Connected. Lesson tool calling works.").waitFor();
     await page.locator('[data-id="openai"]').click();
@@ -81,10 +152,10 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     await page.locator("#start-btn").click();
     await page.locator(".card.quiz").waitFor();
     assert.equal(await page.locator("#canvas-body h1").count(), 1);
-    assert.equal(await page.locator("#input").isDisabled(), true);
+    assert.equal(await page.locator("#input").isEnabled(), true, "the composer stays usable while a quiz waits");
     // Simulate closing the app while waiting for an answer.
     await page.reload();
-    await page.locator('#tree [data-kind="lesson"]').click();
+    await page.locator('#recents [data-kind="lesson"]').click();
     await page.locator(".card.quiz").waitFor();
     assert.equal(await page.locator("#canvas-body h1").count(), 1, "resume duplicated a lesson section");
     await page.locator(".card.quiz .opt").nth(answer).click();
@@ -96,7 +167,6 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     await page.locator('.card.ask input').fill("More examples please");
     await page.locator('.card.ask input').press("Enter");
     await page.getByText("Your answer was received.", { exact: true }).waitFor();
-    await page.waitForFunction(() => !document.body.classList.contains("busy"));
     assert.equal(await page.locator("#input").isEnabled(), true);
     const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("smoke.db")));
     assert.equal(saved.lessons[0].sections.length, 2);
@@ -104,7 +174,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     assert.equal(Object.keys(saved.lessons[0].toolResults).length, 4);
     assert.ok(saved.lessons[0].messages[2].content.some((b) => b.tool_use_id === "quiz-1"));
     await page.reload();
-    await page.locator('#tree [data-kind="lesson"]').click();
+    await page.locator('#recents [data-kind="lesson"]').click();
     await page.locator("#notes-body").getByText("Addition checked. Next: practice.").waitFor({ state: "attached" });
     assert.equal(await page.locator("#canvas-body h1").count(), 1);
     for (const colorScheme of ["light", "dark"]) {
@@ -132,6 +202,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     await page.close();
     console.log(`${engine} UI passed: answer ${answer}, connection success/error, quiz resume, grading, free answer, state reload`);
   }
+  await agentFlow(browser, engine);
   } finally {
     await browser.close();
   }

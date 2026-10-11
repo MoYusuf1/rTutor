@@ -100,11 +100,14 @@ pub fn tools() -> Vec<Value> {
         json!({ "name": "ask",
             "description": "Ask an ungraded multiple-choice question in the chat pane (goals, preferences, what to do next). The learner can also type their own answer.",
             "input_schema": obj(json!({ "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } })) }),
+        json!({ "name": "phase",
+            "description": "Say which phase the lesson is in whenever it changes: probe (finding what the learner knows), plan, teach, or review (testing what was taught). The app offers the learner matching shortcuts.",
+            "input_schema": obj(json!({ "phase": { "type": "string", "enum": ["probe", "plan", "teach", "review"] } })) }),
     ]
 }
 
 pub async fn chat(http: &reqwest::Client, p: &Provider, key: &str, system: &str, messages: &[Value], ch: &Channel<Event>) -> Result<Reply, String> {
-    if !matches!(p.kind.as_str(), "claude-code" | "codex") && p.model.trim().is_empty() {
+    if p.model.trim().is_empty() {
         return Err("Enter a model name before connecting.".into());
     }
     if p.kind == "openai" {
@@ -116,7 +119,6 @@ pub async fn chat(http: &reqwest::Client, p: &Provider, key: &str, system: &str,
     let mut acc = Acc::default();
     match p.kind.as_str() {
         "anthropic" => anthropic(http, p, key, system, messages, ch, &mut acc).await?,
-        "claude-code" | "codex" => crate::cli::run(p, system, messages, ch, &mut acc).await?,
         _ => openai(http, p, key, system, messages, ch, &mut acc).await?,
     }
     acc.finish(ch);

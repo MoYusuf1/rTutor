@@ -1,4 +1,4 @@
-mod cli;
+mod bridge;
 mod db;
 mod llm;
 pub mod mcp;
@@ -107,9 +107,9 @@ fn has_api_key(provider: String) -> Res<bool> {
     Ok(!read_key(&provider)?.is_empty())
 }
 
-// CLI providers use their own sign-in; a missing OS keyring must not block them.
+// Local servers need no key; a missing OS keyring must not block them.
 fn provider_key(provider: &llm::Provider) -> Res<String> {
-    if matches!(provider.kind.as_str(), "claude-code" | "codex") || provider.id == "ollama" {
+    if provider.id == "ollama" {
         Ok(String::new())
     } else {
         read_key(&provider.id)
@@ -132,11 +132,16 @@ async fn test_provider(store: State<'_, Store>, provider: llm::Provider) -> Res<
 // ---------- teaching ----------
 
 fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
+    Ok(format!("{PROMPT}{}", material(c, lesson)?))
+}
+
+/// The learner's attached material for a lesson, as a prompt section ("" when there is none).
+fn material(c: &Connection, lesson: i64) -> Res<String> {
     let sources = db::sources_for(c, lesson)?;
     if sources.is_empty() {
-        return Ok(PROMPT.to_owned());
+        return Ok(String::new());
     }
-    let mut s = String::from(PROMPT);
+    let mut s = String::new();
     s.push_str(
         "\n\n# The learner's material\n\nThe learner attached the material below. Internalize it before you start: it defines \
          what this lesson covers. Probe the learner against its content, build the plan from its ideas, and teach in its \
@@ -146,6 +151,44 @@ fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
         s.push_str(&format!("\n<source name=\"{}\">\n{body}\n</source>\n", name.replace('"', "'")));
     }
     Ok(s)
+}
+
+/// What a terminal agent is told the first time it teaches a lesson: the lesson so far, so it continues instead of
+/// starting over, plus the learner's material.
+fn brief(app: &tauri::AppHandle, lesson: i64) -> Res<String> {
+    let store = app.state::<Store>();
+    let c = store.db()?;
+    let l = db::lesson(&c, lesson)?;
+    let mut s = format!("# Lesson: {}\n\n", l["title"].as_str().unwrap_or_default());
+    let sections: Vec<&str> = l["sections"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let state = l["state"].as_str().unwrap_or_default();
+    if sections.is_empty() {
+        s.push_str("A new lesson: start with the probe.\n");
+    } else {
+        s.push_str("This lesson is already under way. Continue exactly where it left off; don't restart the probe or the plan.\n\n");
+        if !state.is_empty() {
+            s.push_str(&format!("Your lesson state:\n\n{state}\n\n"));
+        }
+        let from = sections.len().saturating_sub(3);
+        s.push_str(&format!("The latest of the canvas's {} sections:\n\n{}\n", sections.len(), sections[from..].join("\n\n---\n\n")));
+    }
+    s.push_str(&material(&c, lesson)?);
+    s.push_str("\n---\n\n");
+    Ok(s)
+}
+
+/// Appends a terminal agent's turn to the lesson history, which the page and API providers read back.
+fn record(app: &tauri::AppHandle, lesson: i64, msg: Value) -> Res<()> {
+    let store = app.state::<Store>();
+    let c = store.db()?;
+    let mut o = store.open.lock().map_err(err)?;
+    if o.lesson == lesson {
+        db::append_message(&c, lesson, o.messages.len(), &msg)?;
+        o.push(msg);
+    } else {
+        db::append_message(&c, lesson, db::next_seq(&c, lesson)?, &msg)?;
+    }
+    Ok(())
 }
 
 /// One model turn. `content` is the learner's message or tool results; `None` resumes a paused turn.
@@ -462,13 +505,15 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             app.manage(Store { db: Mutex::new(db::open(&dir.join("rlearn.db"))?), open: Mutex::default(), http: reqwest::Client::new() });
+            app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, get_settings, save_settings, stats, set_state,
-            pty::term_open, pty::term_write, pty::term_resize
+            pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command,
+            bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");

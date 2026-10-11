@@ -1,13 +1,14 @@
-//! The terminal panel: one real shell in a pseudo-terminal, alive for as long as the app runs.
-//! The page keeps a single xterm.js instance, so its scrollback survives hiding the panel.
+//! The terminal panel: real shells in pseudo-terminals, one per tab. Coding agents run in them and power the app.
+//! The page keeps one xterm.js instance per tab, so scrollback survives hiding the panel.
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{ipc::Channel, AppHandle, Manager};
 
 #[derive(Default)]
-pub struct Term(Mutex<Option<Session>>);
+pub struct Term(Mutex<HashMap<u32, Session>>);
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
@@ -43,12 +44,13 @@ fn take_text(pending: &mut Vec<u8>) -> String {
     }
 }
 
-/// Starts the shell if it isn't running yet; its output streams to `out`.
+/// Starts a shell for tab `tab` in `cwd` if it isn't running yet; its output streams to `out`.
+/// `run` is typed into the new shell, e.g. the agent rlearn starts on launch.
 #[tauri::command]
-pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> Result<(), String> {
+pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, cols: u16, rows: u16, out: Channel<String>) -> Result<(), String> {
     let term = app.state::<Term>();
     let mut slot = term.0.lock().map_err(err)?;
-    if slot.is_some() {
+    if slot.contains_key(&tab) {
         return Ok(());
     }
     let pair = native_pty_system().openpty(size(cols, rows)).map_err(err)?;
@@ -58,17 +60,22 @@ pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+    if std::path::Path::new(&cwd).is_dir() {
+        cmd.cwd(cwd);
+    } else if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         cmd.cwd(home);
     }
     let mut child = pair.slave.spawn_command(cmd).map_err(err)?;
     drop(pair.slave); // the shell holds the only copy, so its exit closes the pty
     let mut reader = pair.master.try_clone_reader().map_err(err)?;
-    let writer = pair.master.take_writer().map_err(err)?;
+    let mut writer = pair.master.take_writer().map_err(err)?;
+    if let Some(run) = run.filter(|r| !r.trim().is_empty()) {
+        writer.write_all(format!("{run}\r").as_bytes()).map_err(err)?; // the shell reads it once it's up
+    }
 
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    *slot = Some(Session { master: pair.master, writer, child: child.clone_killer(), id });
+    slot.insert(tab, Session { master: pair.master, writer, child: child.clone_killer(), id });
     drop(slot);
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -83,44 +90,67 @@ pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> 
             }
         }
         let _ = out.send("\r\n\x1b[2m[shell exited; reopen the terminal to start a new one]\x1b[0m\r\n".into());
-        finish_session(&handle, id);
+        finish_session(&handle, tab, id);
     });
     // On Windows, the read pipe stays open until the pseudoconsole is closed. Wait for the
     // shell independently, then close its session while the reader still drains final output.
     let handle = app.clone();
     std::thread::spawn(move || {
         let _ = child.wait();
-        finish_session(&handle, id);
+        finish_session(&handle, tab, id);
     });
     Ok(())
 }
 
-fn finish_session(app: &AppHandle, id: u64) {
+fn finish_session(app: &AppHandle, tab: u32, id: u64) {
     let term = app.state::<Term>();
     let session = term.0.lock().ok().and_then(|mut slot| {
-        if slot.as_ref().is_some_and(|s| s.id == id) { slot.take() } else { None }
+        if slot.get(&tab).is_some_and(|s| s.id == id) { slot.remove(&tab) } else { None }
     });
     // Closing ConPTY can block while output drains; never hold the state lock during it.
     drop(session);
 }
 
 #[tauri::command]
-pub fn term_write(app: AppHandle, data: String) -> Result<(), String> {
+pub fn term_write(app: AppHandle, tab: u32, data: String) -> Result<(), String> {
     let term = app.state::<Term>();
     let mut slot = term.0.lock().map_err(err)?;
-    let s = slot.as_mut().ok_or("The terminal isn't running.")?;
+    let s = slot.get_mut(&tab).ok_or("The terminal isn't running.")?;
     s.writer.write_all(data.as_bytes()).map_err(err)?;
     s.writer.flush().map_err(err)
 }
 
 #[tauri::command]
-pub fn term_resize(app: AppHandle, cols: u16, rows: u16) -> Result<(), String> {
+pub fn term_resize(app: AppHandle, tab: u32, cols: u16, rows: u16) -> Result<(), String> {
     let term = app.state::<Term>();
     let slot = term.0.lock().map_err(err)?;
-    match slot.as_ref() {
+    match slot.get(&tab) {
         Some(s) => s.master.resize(size(cols, rows)).map_err(err),
         None => Ok(()),
     }
+}
+
+/// Closing a tab ends its shell, and with it any agent running there.
+#[tauri::command]
+pub fn term_close(app: AppHandle, tab: u32) -> Result<(), String> {
+    let session = app.state::<Term>().0.lock().map_err(err)?.remove(&tab);
+    drop(session); // outside the lock: ConPTY teardown can block
+    Ok(())
+}
+
+/// Picks the folder a new terminal opens in.
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog().file().blocking_pick_folder()?.into_path().ok().map(|p| p.display().to_string())
+}
+
+/// What an agent needs to start rlearn's tool server (this executable), and where terminals open by default.
+#[tauri::command]
+pub fn mcp_command() -> Result<serde_json::Value, String> {
+    let bin = std::env::current_exe().map_err(err)?.display().to_string();
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    Ok(serde_json::json!({ "bin": bin, "home": home }))
 }
 
 #[cfg(test)]

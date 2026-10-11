@@ -12,28 +12,23 @@
       <span class="logo" title="rlearn">L</span>
       <button id="collapse" class="icon" data-icon="sidebar" title="Hide sidebar"></button>
     </header>
-    <nav class="tabs">
-      <button class="icon tab active" data-tab="files" data-icon="folder" title="Files"></button>
-      <button class="icon tab" data-tab="search" data-icon="search" title="Search"></button>
-      <button class="icon tab" data-tab="bookmarks" data-icon="bookmark" title="Bookmarks"></button>
-      <span class="spacer"></span>
-      <button id="new-lesson" class="icon files-only" data-icon="filePlus" title="New lesson"></button>
-      <button id="new-folder" class="icon files-only" data-icon="folderPlus" title="New folder"></button>
+    <nav class="actions">
+      <button id="new-lesson" class="act"><span data-icon="edit"></span>New lesson</button>
+      <button id="search-btn" class="act"><span data-icon="search"></span>Search</button>
+      <input id="search-input" type="search" aria-label="Search lessons" placeholder="Search lessons" spellcheck="false" hidden>
     </nav>
-
-    <section id="files" class="panel">
-      <div id="tree" role="tree"></div>
-    </section>
-    <section id="search" class="panel" hidden>
-      <input id="search-input" type="search" aria-label="Search lessons" spellcheck="false">
-      <div id="results" class="list"></div>
-    </section>
-    <section id="bookmarks" class="panel" hidden>
-      <div id="marks" class="list"></div>
-    </section>
-
+    <div id="side-scroll">
+      <div id="results" class="list" hidden></div>
+      <div id="sections">
+        <section id="pinned-sec" hidden><h3>Pinned</h3><div id="pinned"></div></section>
+        <section><h3>Folders<button id="new-folder" class="icon mini" data-icon="plus" title="New folder"></button></h3><div id="tree" role="tree"></div></section>
+        <section><h3>Recents</h3><div id="recents"></div></section>
+      </div>
+    </div>
+    <div id="offer" hidden></div>
+    <div id="pop" hidden></div>
     <div class="foot">
-      <button id="model" class="model" title="Model"><span data-icon="spark"></span><span id="who"></span></button>
+      <button id="model" class="model" aria-haspopup="true"><span id="who-logo"></span><span class="who"><span id="who"></span><small id="who-sub"></small></span></button>
       <button id="term-btn" class="icon" data-icon="terminal" title="Terminal (Ctrl+`)"></button>
     </div>
   </aside>
@@ -64,14 +59,13 @@
       <article id="canvas-body"></article>
     </section>
     <aside id="chat" aria-label="Chat">
-      <header class="chat-head"><h2>Tutor</h2><span id="chat-provider"></span></header>
+      <div id="chat-grip" title="Drag to resize"></div>
       <div id="log" aria-live="polite"></div>
-      <div id="meter"></div>
+      <div id="suggest" class="suggest"></div>
       <form id="composer">
         <textarea id="input" rows="1" aria-label="Message" placeholder="Ask your tutor…"></textarea>
         <button class="send" data-icon="send" aria-label="Send"></button>
       </form>
-      <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
     </aside>
   </main>
 
@@ -82,16 +76,22 @@
     </article>
   </main>
 
-  <section id="drawer" hidden aria-label="Agent and terminal">
+  <section id="drawer" hidden aria-label="Terminal">
     <div id="drawer-grip" title="Drag to resize"></div>
     <div class="drawer-bar">
-      <button class="dtab active" data-pane="agent">Agent</button>
-      <button class="dtab" data-pane="shell">Terminal</button>
+      <div id="ttabs"></div>
+      <button id="tnew" class="icon" data-icon="plus" title="New terminal"></button>
       <span class="spacer"></span>
-      <button id="drawer-close" class="icon" data-icon="x" aria-label="Close panel"></button>
+      <button id="drawer-close" class="icon" data-icon="x" aria-label="Hide terminal"></button>
     </div>
-    <div id="agent-log" class="pane" aria-live="polite"></div>
-    <div id="shell" class="pane" hidden></div>
+    <form id="where" class="where">
+      <p>Where should the terminal open?</p>
+      <div class="where-row">
+        <button type="button" id="where-dir" class="dir"></button>
+        <button class="primary">Open</button>
+      </div>
+    </form>
+    <div id="shells"></div>
   </section>
 
   <div id="menu" role="menu" hidden></div>
@@ -99,7 +99,7 @@
   <dialog id="settings">
     <form method="dialog">
       <header>
-        <h2>Model</h2>
+        <h2>API provider</h2>
         <button value="close" class="icon" data-icon="x" aria-label="Close"></button>
       </header>
       <div id="p-list" class="segmented" role="radiogroup" aria-label="Provider"></div>
@@ -108,7 +108,7 @@
       <label id="p-key-row">Key <input id="p-key" type="password" autocomplete="off"></label>
       <button id="p-test" type="button" class="wide">Test connection</button>
       <p id="p-status" role="status" aria-live="polite"></p>
-      <button value="save" class="primary wide">Save</button>
+      <button value="save" class="primary wide">Use this provider</button>
     </form>
   </dialog>
 </body>
