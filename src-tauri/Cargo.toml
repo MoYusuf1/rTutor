@@ -26,6 +26,7 @@ tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["macros", "rt"] }
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 opt-level = "s"     # size over raw speed; the app's hot paths are network-bound

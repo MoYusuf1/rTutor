@@ -1,6 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2 } from "lucide";
+import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2, ScrollText, Copy } from "lucide";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
@@ -27,7 +27,7 @@ const store = {
 const ICONS = {
   sidebar: PanelLeft, folder: Folder, folderOpen: FolderOpen, search: Search, edit: SquarePen, plus: Plus, doc: FileText,
   chev: ChevronRight, clip: Paperclip, x: X, send: ArrowUp, spark: Sparkles, terminal: SquareTerminal, gear: Settings2,
-  sources: LibraryBig, lesson: BookOpenText, trash: Trash2,
+  sources: LibraryBig, lesson: BookOpenText, trash: Trash2, log: ScrollText, copy: Copy,
 };
 const icon = (name, size = 20) =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]
@@ -175,9 +175,11 @@ function follow(node) {
   if (s.scrollHeight - s.scrollTop - s.clientHeight < 200) s.scrollTop = s.scrollHeight;
 }
 const log = () => $("#log");
-/** Adds to the chat, always above the live "Thinking…" block. */
+/** Adds to the chat. Anything the tutor shows ends the current "Thinking…" block, which folds above it;
+ *  a new one starts below if it keeps working. */
 function chatNode(node) {
-  log().insertBefore(node, work?.node.parentNode === log() ? work.node : null);
+  if (work) thinking(false);
+  log().append(node);
   log().scrollTop = log().scrollHeight;
   return node;
 }
@@ -188,7 +190,27 @@ const note = (text) => chatNode(el("div", "meta", text));
 // While the tutor works, a collapsible "Thinking…" block shows what it is doing: its reasoning (API models
 // that share it) and each step (searching the material, writing on the canvas). Afterwards it folds into
 // "Thought for 12s". Terminal agents show their full reasoning in their own terminal.
-let work = null; // { node, body, label, started, steps }
+let work = null; // { node, body, label, started, steps, timer }
+
+// What the "Thinking…" line says, picked fresh each time, the way Claude Code does
+const MUSINGS = [
+  "Thinking", "Pondering", "Turning pages", "Connecting the dots", "Sharpening a question", "Finding a good example",
+  "Sketching it out", "Mulling it over", "Choosing the next step", "Looking it up", "Drawing a picture", "Weighing the options",
+  "Untangling it", "Lining up the ideas", "Finding the right angle", "Checking the material", "Building it up",
+];
+const musing = () => MUSINGS[Math.floor(Math.random() * MUSINGS.length)];
+
+/** The live line: a musing, how long it's been, and, for an agent that hasn't picked the message up, that. */
+function workLabel() {
+  if (!work) return;
+  const secs = Math.round((Date.now() - work.started) / 1000);
+  const a = agents.find((x) => x.id === activeAgent);
+  const pending = usingAgent() && sentWaiting && a && !a.busy;
+  work.label.textContent = pending
+    ? `Waiting for ${agentLook(a.name).label} to pick this up… ${secs}s`
+    : `${work.musing}… ${secs >= 3 ? `${secs}s` : ""}`.trim();
+  if (secs && secs % 8 === 0) work.musing = musing();
+}
 
 function thinking(on) {
   if (on && !work) {
@@ -196,17 +218,20 @@ function thinking(on) {
     const summary = el("summary");
     const dots = el("span", "dots");
     dots.append(el("i"), el("i"), el("i"));
-    const label = el("span", "", "Thinking…");
+    const label = el("span", "", "");
     summary.append(dots, label);
     const body = el("div", "work-body");
     node.append(summary, body);
     node.open = true; // open while it works, folded once it's done
     log().append(node);
     log().scrollTop = log().scrollHeight;
-    work = { node, body, label, started: Date.now(), steps: 0 };
+    work = { node, body, label, started: Date.now(), steps: 0, musing: musing() };
+    work.timer = setInterval(workLabel, 1000);
+    workLabel();
   } else if (!on && work) {
     const w = work;
     work = null;
+    clearInterval(w.timer);
     if (!w.steps && !w.body.textContent.trim()) w.node.remove();
     else {
       w.node.classList.add("done");
@@ -372,6 +397,20 @@ side.addEventListener("drop", async (e) => {
 });
 side.addEventListener("dragend", () => { dragged = null; renderSidebar(); });
 
+// ---------- confirm dialog ----------
+
+/** Asks before something can't be undone. Resolves true on the red button. */
+function confirmDialog([title, text, action]) {
+  const d = $("#confirm");
+  $("#confirm-title").textContent = title;
+  $("#confirm-text").textContent = text;
+  $("#confirm-ok").textContent = action;
+  d.returnValue = "";
+  d.showModal();
+  $("#confirm-ok").focus();
+  return new Promise((resolve) => d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true }));
+}
+
 // ---------- context menu ----------
 
 function menu(x, y, entries) {
@@ -381,12 +420,8 @@ function menu(x, y, entries) {
       if (e === "-") return el("hr");
       const b = el("button", e.danger ? "danger" : "", e.label);
       b.onclick = async () => {
-        if (e.danger && !b.dataset.armed) {
-          b.dataset.armed = "1";
-          b.textContent = "Click again to delete";
-          return;
-        }
         m.hidden = true;
+        if (e.danger && !(await confirmDialog(e.confirm ?? [`${e.label}?`, "This can't be undone.", e.label]))) return;
         await e.run();
       };
       return b;
@@ -419,7 +454,7 @@ side.addEventListener("contextmenu", (e) => {
       { label: "New folder inside", run: () => newFolder(id) },
       "-",
       { label: "Rename", run: () => rename(r) },
-      { label: "Delete subject", danger: true, run: async () => {
+      { label: "Delete subject", danger: true, confirm: [`Delete “${it.name}”?`, "Its lessons and material go too. This can't be undone.", "Delete subject"], run: async () => {
         await invoke("delete_folder", { id });
         if (lesson && !data.lessons.some((l) => l.id === lesson.id && l.folder !== id)) startNew(null);
         refresh();
@@ -431,14 +466,14 @@ side.addEventListener("contextmenu", (e) => {
       { label: "Rename", run: () => rename(r) },
       { label: "Export as Markdown", run: () => invoke("export_lesson", { id }) },
       "-",
-      { label: "Delete lesson", danger: true, run: async () => {
+      { label: "Delete lesson", danger: true, confirm: [`Delete “${it.title}”?`, "The lesson, its chat and notes go for good.", "Delete lesson"], run: async () => {
         await invoke("delete_lesson", { id });
         if (lesson?.id === id) startNew(target);
         refresh();
       } },
     ]);
   } else {
-    menu(e.clientX, e.clientY, [{ label: "Remove material", danger: true, run: async () => { await invoke("delete_source", { id }); refresh(); } }]);
+    menu(e.clientX, e.clientY, [{ label: "Remove material", danger: true, confirm: [`Remove “${it.name}”?`, "The tutor won't teach from it anymore.", "Remove"], run: async () => { await invoke("delete_source", { id }); refresh(); } }]);
   }
 });
 
@@ -518,12 +553,17 @@ const GEARS = {
     tell: "I'm already familiar with this. Test me to find my gaps, then teach what I miss." },
 };
 let gear = store.get("learn.gear", "probe");
+const OPENERS = [
+  "What do you want to learn?", "What are we learning today?", "What's next on your list?", "Where should we begin?",
+  "What do you want to understand?", "What's been on your mind?", "Pick something to master.", "What are you curious about?",
+];
+let opener = OPENERS[0];
 
 function renderStart() {
   const path = folderPath(target);
   const subject = target != null;
   $("#crumb").textContent = subject ? (path.length > 1 ? `${path.slice(0, -1).join(" / ")} · New lesson` : "New lesson") : "";
-  $("#start-title").textContent = subject ? path.at(-1) : "What do you want to learn?";
+  $("#start-title").textContent = subject ? path.at(-1) : opener;
   $("#start-input").setAttribute("aria-label", subject ? "What should this lesson cover?" : "What do you want to learn?");
   $("#materials").replaceChildren(...pending.map((p, i) => chip(p.name, p.words, () => { pending.splice(i, 1); renderStart(); })));
   $("#gears").replaceChildren(
@@ -550,7 +590,12 @@ function renderStart() {
         x.type = "button";
         x.innerHTML = icon("x", 16);
         x.title = `Remove ${s.name}`;
-        x.onclick = async () => { await invoke("delete_source", { id: s.id }); await refresh(); renderStart(); };
+        x.onclick = async () => {
+          if (!(await confirmDialog([`Remove “${s.name}”?`, "The tutor won't teach from it anymore.", "Remove"]))) return;
+          await invoke("delete_source", { id: s.id });
+          await refresh();
+          renderStart();
+        };
         r.append(name, el("small", "", `${s.words.toLocaleString()} words`), x);
         return r;
       }),
@@ -568,6 +613,7 @@ function leave() {
 
 function startNew(folder) {
   leave();
+  if (folder == null) opener = OPENERS[Math.floor(Math.random() * OPENERS.length)];
   lesson = null;
   target = folder;
   pending = [];
@@ -639,27 +685,33 @@ function showNotes(markdown) {
 /** The Sources panel (top right of a lesson): everything the tutor teaches this lesson from. */
 function renderSources() {
   const list = materialsFor(lesson.folder, lesson.id);
+  const words = list.reduce((n, s) => n + s.words, 0);
   $("#sources-count").textContent = list.length || "";
-  $("#sources-list").replaceChildren(
-    ...(list.length ? [] : [el("p", "empty", "Nothing yet. Add a textbook, slides, notes or a transcript, or drop files here.")]),
+  const head = el("header");
+  head.append(el("h3", "", "Sources"), el("span", "sub", list.length ? `${list.length} in this subject · ${fmt(words)} words` : "None yet"));
+  $("#sources-pop").replaceChildren(
+    head,
+    ...(list.length ? [] : [el("p", "empty", "Use + in the chat, or drop files anywhere, to add a textbook, slides, notes or a transcript.")]),
     ...list.map((s) => {
-      const r = el("div", "mat");
-      r.innerHTML = icon("doc", 18);
-      const name = el("button", "name", s.name);
-      name.type = "button";
-      name.title = "Open";
-      name.onclick = () => openSource(s);
-      const x = el("button", "icon");
+      const r = el("div", "src");
+      const kind = (s.name.match(/\.(\w+)$/)?.[1] ?? "txt").toUpperCase();
+      const badge = el("span", `kind kind-${kind.toLowerCase()}`, kind.slice(0, 4));
+      const text = el("button", "src-text");
+      text.type = "button";
+      text.title = "Open";
+      text.append(el("span", "name", s.name.replace(/\.\w+$/, "")), el("small", "", `${s.words.toLocaleString()} words`));
+      text.onclick = () => { toggleSources(false); openSource(s); };
+      const x = el("button", "icon remove");
       x.type = "button";
-      x.innerHTML = icon("x", 16);
+      x.innerHTML = icon("trash", 16);
       x.title = "Remove";
       x.onclick = async () => {
-        if (!x.classList.contains("armed")) return x.classList.add("armed"); // a second click removes it
+        if (!(await confirmDialog([`Remove “${s.name}”?`, "The tutor won't teach from it anymore.", "Remove"]))) return;
         await invoke("delete_source", { id: s.id });
         await refresh();
         renderSources();
       };
-      r.append(name, el("small", "", `${Math.round(s.words / 1000) || "<1"}k words`), x);
+      r.append(badge, text, x);
       return r;
     }),
   );
@@ -976,7 +1028,7 @@ function renderSuggest() {
   now.title = "The lesson's current gear";
   now.append(el("i"), PHASES[phase] ?? "Not started");
   $("#suggest").replaceChildren(
-    ...(lesson ? [now] : []),
+    ...(PHASES[phase] ? [now] : []),
     ...(SUGGEST[phase] ?? SUGGEST.none).map(([label, text]) => {
       const b = el("button", "", label);
       b.type = "button";
@@ -1091,6 +1143,7 @@ agentEvents.onmessage = async (e) => {
   } else if (e.type === "call") {
     const to = lesson?.id === e.lesson ? lesson : { id: e.lesson, sections: 1, state: "" };
     agentLesson = e.lesson;
+    if (lesson?.id === e.lesson && !openCard && !["say", "quiz", "ask"].includes(e.name)) thinking(true); // its steps show as they happen
     let result;
     try {
       result = await executeTool({ id: `agent-${e.id}`, name: e.name, input: e.input ?? {} }, { live: new Map(), invalid: {}, truncated: false }, to);
@@ -1107,19 +1160,20 @@ function connected(a) {
   const look = agentLook(a.name);
   const cmd = launched.get(a.cwd) || a.cmd;
   const main = settings.main;
-  if (!cmd || (main && main.cmd === cmd && main.cwd === a.cwd) || settings.asked?.includes(cmd)) return;
+  const kind = kindOf(cmd);
+  if (!cmd || (main && main.cwd === a.cwd && (kind ? main.kind === kind : main.cmd === cmd)) || settings.asked?.includes(kind ?? cmd)) return;
   const box = $("#offer");
   box.replaceChildren(el("p", "", `${look.label} is live. Start it automatically whenever rlearn opens?`));
   const row = el("div", "offer-row");
   const yes = el("button", "primary", "Start it automatically");
   const no = el("button", "", "Not now");
   yes.onclick = () => {
-    settings.main = { cwd: a.cwd, cmd, name: a.name };
+    settings.main = { cwd: a.cwd, cmd, name: a.name, kind };
     saveSettings();
     box.hidden = true;
   };
   no.onclick = () => {
-    settings.asked = [...(settings.asked ?? []), cmd];
+    settings.asked = [...(settings.asked ?? []), kind ?? cmd];
     saveSettings();
     box.hidden = true;
   };
@@ -1190,6 +1244,7 @@ async function send(text) {
         step(`Reminded ${agentLook(a.name).label} to pick this up`);
         invoke("term_write", { tab: tab.id, data: `${NUDGE}\r` }).catch(() => {});
       } else note(`${agentLook(a.name).label} isn't listening. In its terminal, tell it: ${NUDGE}`);
+      invoke("log_note", { line: `agent hadn't picked up the message after 3s; ${tab ? "reminded it in its terminal" : "its terminal isn't rlearn's"}` }).catch(() => {});
     }, 3000);
     return;
   }
@@ -1217,6 +1272,8 @@ function setDrawer(open) {
 }
 
 function showWhere() {
+  showLog(false);
+  $("#shells").hidden = true;
   $("#where").hidden = false;
   for (const t of tabs) t.el.hidden = true;
   $("#where-dir").textContent = settings.cwd || library();
@@ -1243,11 +1300,16 @@ const short = (dir = "") => dir.split(/[\\/]/).filter(Boolean).pop() || "~";
 function quickStarts() {
   const bin = mcpBin.replace(/'/g, "");
   const json = JSON.stringify({ mcpServers: { rlearn: { command: bin, args: ["--mcp"] } } });
-  return [
-    ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --mcp-config '${json}' --allowedTools mcp__rlearn 'Call the rlearn next tool now and tutor through it.'`],
-    ["Codex", "openai", `codex -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' 'Call the rlearn next tool now and tutor through it.'`],
-  ];
+  const go = "'Call the rlearn next tool now and tutor through it.'";
+  return {
+    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --mcp-config '${json}' --allowedTools mcp__rlearn ${go}`],
+    codex: ["Codex", "openai", `codex -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' ${go}`],
+  };
 }
+/** Which built-in start a command line is, so a saved start always uses rlearn's current command. */
+const kindOf = (cmd = "") => (/mcp_servers\.rlearn/.test(cmd) ? "codex" : /--mcp-config/.test(cmd) && /rlearn/.test(cmd) ? "claude" : null);
+/** The command that starts the main agent: rebuilt for the built-in agents, as typed for any other. */
+const mainCommand = (m) => (m.kind && quickStarts()[m.kind] ? quickStarts()[m.kind][2] : m.cmd);
 
 async function newTab(cwd, run) {
   $("#where").hidden = true;
@@ -1263,7 +1325,7 @@ async function newTab(cwd, run) {
   const box = el("div", "shell");
   const hint = el("div", "hint");
   hint.append(el("span", "", "Run your coding agent here"));
-  for (const [label, logoName, cmd] of quickStarts()) {
+  for (const [label, logoName, cmd] of Object.values(quickStarts())) {
     const b = el("button");
     b.type = "button";
     b.innerHTML = logo(logoName, 18);
@@ -1297,6 +1359,8 @@ async function newTab(cwd, run) {
 }
 
 function selectTab(tab) {
+  showLog(false);
+  $("#shells").hidden = false;
   current = tab;
   for (const t of tabs) t.el.hidden = t !== tab;
   renderTabs();
@@ -1345,6 +1409,41 @@ function fitShell() {
 function openTerminal() {
   setDrawer(true);
   if (tabs.length) showWhere(); // a new terminal for another agent
+}
+
+// ---------- the Log tab: what happened, one line per fact (agents, messages, tool calls, errors) ----------
+
+const logLines = $("#log-lines");
+function logLine(text) {
+  const atEnd = logLines.scrollHeight - logLines.scrollTop - logLines.clientHeight < 40;
+  const line = el("div", /error|gave up|dropped|stopped waiting|disconnected/.test(text) ? "bad" : /received|connected|started/.test(text) ? "good" : "", text);
+  logLines.append(line);
+  while (logLines.childElementCount > 1500) logLines.firstElementChild.remove(); // keeps memory flat
+  if (atEnd) logLines.scrollTop = logLines.scrollHeight;
+}
+function showLog(on) {
+  $("#logpane").hidden = !on;
+  $("#shells").hidden = on;
+  $("#logtab").classList.toggle("active", on);
+  if (on) {
+    $("#where").hidden = true;
+    for (const t of tabs) t.el.hidden = true;
+    current = null;
+    renderTabs();
+    logLines.scrollTop = logLines.scrollHeight;
+  }
+}
+$("#logtab").onclick = () => showLog(true);
+$("#log-copy").onclick = () => navigator.clipboard.writeText([...logLines.children].map((l) => l.textContent).join("\n"));
+{
+  const ch = new Channel();
+  ch.onmessage = logLine;
+  invoke("log_listen", { onLine: ch })
+    .then(([path, lines]) => {
+      $("#log-path").textContent = path;
+      lines.forEach(logLine);
+    })
+    .catch(() => {});
 }
 
 $("#term-btn").onclick = () => setDrawer(drawer.hidden);
@@ -1615,4 +1714,7 @@ setCollapsed(store.get("learn.collapsed", false));
 await refresh();
 startNew(null);
 // the main agent starts with the app, out of sight until the learner opens the terminal
-if (settings.main) newTab(settings.main.cwd, settings.main.cmd);
+if (settings.main) {
+  settings.main.kind ??= kindOf(settings.main.cmd); // saved before starts were rebuilt
+  newTab(settings.main.cwd, mainCommand(settings.main));
+}

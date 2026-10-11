@@ -57,10 +57,7 @@
 
   <main id="lesson" hidden>
     <button id="sources-btn" class="sources-btn" aria-expanded="false" title="Sources"><span data-icon="sources"></span>Sources<span id="sources-count"></span></button>
-    <div id="sources-pop" hidden>
-      <header><h3>Sources</h3></header>
-      <div id="sources-list"></div>
-    </div>
+    <div id="sources-pop" hidden></div>
     <section id="canvas" aria-label="Lesson">
       <header class="canvas-head">
         <h1 id="title"></h1>
@@ -90,6 +87,7 @@
   <section id="drawer" hidden aria-label="Terminal">
     <div id="drawer-grip" title="Drag to resize"></div>
     <div class="drawer-bar">
+      <button type="button" id="logtab" class="dtab"><span data-icon="log"></span>Log</button>
       <div id="ttabs"></div>
       <button id="tnew" class="icon" data-icon="plus" title="New terminal"></button>
       <span class="spacer"></span>
@@ -103,9 +101,23 @@
       </div>
     </form>
     <div id="shells"></div>
+    <div id="logpane" hidden>
+      <div class="log-bar"><span id="log-path"></span><button type="button" id="log-copy" class="ghost">Copy</button></div>
+      <div id="log-lines"></div>
+    </div>
   </section>
 
   <div id="menu" role="menu" hidden></div>
+  <dialog id="confirm" class="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <div class="confirm-row">
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="ok" class="danger-btn" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
   <div id="dropping" hidden><p>Drop to add as material</p></div>
 
   <dialog id="settings">

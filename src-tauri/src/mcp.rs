@@ -111,15 +111,23 @@ fn presence(name: String, agent: Arc<Mutex<Option<u64>>>) {
     }
 }
 
-fn forward(agent: Option<u64>, tool: &str, input: &Value) -> (String, bool) {
+/// Tool calls in flight, by JSON-RPC id, so a cancelled one can hang up on the app (which then stops waiting).
+type Calls = Arc<Mutex<std::collections::HashMap<String, TcpStream>>>;
+
+fn forward(agent: Option<u64>, tool: &str, input: &Value, id: &Value, calls: &Calls) -> (String, bool) {
     const CLOSED: &str = "rlearn isn't open. Ask the learner to open it, then call next again.";
     let Some(agent) = agent else { return (CLOSED.into(), true) };
     let Some((mut stream, token)) = connect() else { return (CLOSED.into(), true) };
     if writeln!(stream, "{}", json!({ "token": token, "agent": agent, "tool": tool, "input": input })).is_err() {
         return (CLOSED.into(), true);
     }
+    if let Ok(clone) = stream.try_clone() {
+        calls.lock().unwrap().insert(id.to_string(), clone);
+    }
     let mut line = String::new();
-    match BufReader::new(stream).read_line(&mut line) {
+    let read = BufReader::new(stream).read_line(&mut line);
+    calls.lock().unwrap().remove(&id.to_string());
+    match read {
         Ok(1..) => {
             let v: Value = serde_json::from_str(&line).unwrap_or_default();
             (v["text"].as_str().unwrap_or_default().to_owned(), v["error"] == true)
@@ -131,8 +139,10 @@ fn forward(agent: Option<u64>, tool: &str, input: &Value) -> (String, bool) {
 /// Serves until stdin closes (when the agent exits). Tool calls run on their own threads: `next` and
 /// `quiz` wait on the learner, and other calls mustn't queue behind them.
 pub fn serve() {
+    crate::log::init(&data_dir());
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let agent = Arc::new(Mutex::new(None::<u64>));
+    let calls: Calls = Arc::default();
     let send = |out: &Mutex<std::io::Stdout>, v: Value| {
         let mut out = out.lock().unwrap();
         let _ = writeln!(out, "{v}");
@@ -143,11 +153,19 @@ pub fn serve() {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         if msg["method"] == "initialize" && !std::mem::replace(&mut started, true) {
             let name = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("agent").to_owned();
+            crate::log::note(format!("mcp   started by {name}"));
             let agent = agent.clone();
             std::thread::spawn(move || presence(name, agent));
         }
+        if msg["method"] == "notifications/cancelled" {
+            let id = msg["params"]["requestId"].to_string();
+            if let Some(stream) = calls.lock().unwrap().remove(&id) {
+                crate::log::note(format!("mcp   the agent cancelled call {id}"));
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
         if msg["method"] == "tools/call" {
-            let (out, agent) = (stdout.clone(), agent.clone());
+            let (out, agent, calls) = (stdout.clone(), agent.clone(), calls.clone());
             std::thread::spawn(move || {
                 // give a just-started presence connection a moment to register
                 for _ in 0..20 {
@@ -156,8 +174,8 @@ pub fn serve() {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                let id = agent.lock().unwrap().clone();
-                let (text, error) = forward(id, msg["params"]["name"].as_str().unwrap_or_default(), &msg["params"]["arguments"]);
+                let id = *agent.lock().unwrap();
+                let (text, error) = forward(id, msg["params"]["name"].as_str().unwrap_or_default(), &msg["params"]["arguments"], &msg["id"], &calls);
                 send(&out, reply(&msg["id"], tool_text(&text, error)));
             });
         } else if let Some(answer) = handle(&msg) {

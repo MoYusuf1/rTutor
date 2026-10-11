@@ -1,6 +1,7 @@
 mod bridge;
 mod db;
 mod llm;
+pub mod log;
 mod material;
 pub mod mcp;
 mod pty;
@@ -210,7 +211,7 @@ fn set_subject_notes(store: State<Store>, lesson: i64, markdown: String) -> Res<
 
 /// What a terminal agent is told the first time it teaches a lesson: the lesson so far, so it continues instead of
 /// starting over, plus the learner's material.
-fn brief(app: &tauri::AppHandle, lesson: i64) -> Res<String> {
+fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<String> {
     let store = app.state::<Store>();
     let c = store.db()?;
     let l = db::lesson(&c, lesson)?;
@@ -233,7 +234,7 @@ fn brief(app: &tauri::AppHandle, lesson: i64) -> Res<String> {
 }
 
 /// Appends a terminal agent's turn to the lesson history, which the page and API providers read back.
-fn record(app: &tauri::AppHandle, lesson: i64, msg: Value) -> Res<()> {
+fn record<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msg: Value) -> Res<()> {
     let store = app.state::<Store>();
     let c = store.db()?;
     let mut o = store.open.lock().map_err(err)?;
@@ -311,9 +312,23 @@ async fn send(
     let turn = futures_util::future::Abortable::new(llm::chat(&store.http, &provider, &key, &system, &messages[from..], &on_event), registration).await;
     store.stops.lock().map_err(err)?.remove(&lesson);
     // stopped: the learner's message stays in the history, the half-finished reply doesn't
-    let mut reply = turn.map_err(|_| "Stopped.".to_owned())??;
+    let mut reply = match turn {
+        Err(_) => {
+            log::note(format!("api   {} stopped by the learner", provider.id));
+            return Err("Stopped.".into());
+        }
+        Ok(Err(e)) => {
+            log::note(format!("api   {} error: {e}", provider.id));
+            return Err(e);
+        }
+        Ok(Ok(r)) => r,
+    };
     reply.usage.ms = started.elapsed().as_millis() as u64;
     let u = &reply.usage;
+    log::note(format!(
+        "api   {} {} in + {} cached / {} out  {:.1}s  stop={}",
+        u.model, u.input + u.cache_write, u.cache_read, u.output, u.ms as f64 / 1000.0, reply.stop_reason
+    ));
     llm::log(&on_event, format!(
         "done  {}  {} in + {} cached / {} out  {:.1}s  stop={}",
         u.model, u.input + u.cache_write, u.cache_read, u.output, u.ms as f64 / 1000.0, reply.stop_reason
@@ -631,6 +646,8 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            log::init(&dir);
+            log::note(format!("rlearn {} started", env!("CARGO_PKG_VERSION")));
             let c = db::open(&dir.join("rlearn.db"))?;
             relocate_sources(&c);
             app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
@@ -642,7 +659,7 @@ pub fn run() {
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command,
-            stop_turn, set_subject_notes, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
+            stop_turn, set_subject_notes, log::log_listen, log::log_note, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
         .run(tauri::generate_context!())
         .expect("error while running rlearn");

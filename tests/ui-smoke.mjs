@@ -29,6 +29,7 @@ async function agentFlow(browser, engine) {
           case "rename_lesson": lesson.title = args.title; return;
           case "agent_send": state.sent.push(args.text); return;
           case "agent_stop": state.stopped = true; return;
+          case "log_listen": return ["/tmp/rlearn.log", ["12:00:00.000Z agent connected"]];
           case "material_search": return "material 1, part 2: voltage is push per charge";
           case "agent_result": state.results[args.id] = args.result; return;
           case "save_settings": case "agent_use": return;
@@ -80,6 +81,17 @@ async function agentFlow(browser, engine) {
   await page.locator(".meta").getByText("Stopped.").waitFor();
   assert.ok(await page.evaluate(() => window.__state.stopped), "stop reaches the agent");
   await page.locator(".work.done").first().waitFor();
+  // deleting asks first, in a dialog
+  await page.locator("#tree .row.lesson").click({ button: "right" });
+  await page.locator("#menu").getByText("Delete lesson").click();
+  await page.locator("#confirm[open]").getByText("Delete lesson").waitFor();
+  await page.locator("#confirm").getByText("Cancel").click();
+  assert.equal(await page.locator("#confirm[open]").count(), 0);
+  assert.equal(await page.locator("#tree .row.lesson").count(), 1, "cancel keeps the lesson");
+  // the Log tab shows what happened
+  await page.locator("#term-btn").click();
+  await page.locator("#logtab").click();
+  await page.locator("#log-lines").getByText("agent connected").waitFor();
   await emit({ type: "agents", agents: [], active: null });
   await page.locator("#who").getByText("No agent", { exact: true }).waitFor();
   assert.deepEqual(errors, []);

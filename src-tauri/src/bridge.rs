@@ -12,7 +12,18 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
+
+use crate::log::note;
+
+/// True once the other end of `stream` has hung up (the agent gave up on the call).
+fn closed(stream: &TcpStream) -> bool {
+    let mut buf = [0u8; 1];
+    let _ = stream.set_nonblocking(true);
+    let gone = matches!(stream.peek(&mut buf), Ok(0)) || matches!(stream.peek(&mut buf), Err(e) if e.kind() != std::io::ErrorKind::WouldBlock);
+    let _ = stream.set_nonblocking(false);
+    gone
+}
 
 /// How long `next` waits before telling the agent to ask again. Below the tool timeouts rlearn sets up.
 const WAIT: Duration = Duration::from_secs(20 * 60);
@@ -42,7 +53,9 @@ struct Agent {
     busy: bool,
     waiting: bool, // inside `next`: it will see the learner's message at once
     #[serde(skip)]
-    stopped: bool, // the learner pressed stop: its next lesson tool call is refused
+    stopped: bool,
+    #[serde(skip)]
+    unanswered: Option<(i64, String)>, // the last message it got, until it does something with it // the learner pressed stop: its next lesson tool call is refused
     #[serde(skip)]
     lesson: i64, // the lesson its latest message came from; its tool calls apply there
     #[serde(skip)]
@@ -62,7 +75,7 @@ fn random() -> String {
 
 impl Bridge {
     /// Listens on a free localhost port and writes it, with a fresh token, where `rlearn --mcp` looks.
-    pub fn start(app: &AppHandle, data_dir: &std::path::Path) -> std::io::Result<Bridge> {
+    pub fn start<R: Runtime>(app: &AppHandle<R>, data_dir: &std::path::Path) -> std::io::Result<Bridge> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let token = random();
         let info = json!({ "port": listener.local_addr()?.port(), "token": token });
@@ -97,7 +110,7 @@ impl Bridge {
     }
 }
 
-fn serve(app: &AppHandle, stream: TcpStream) -> std::io::Result<()> {
+fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<()> {
     let bridge = app.state::<Bridge>();
     let mut lines = BufReader::new(stream.try_clone()?).lines();
     let Some(Ok(first)) = lines.next() else { return Ok(()) };
@@ -112,16 +125,18 @@ fn serve(app: &AppHandle, stream: TcpStream) -> std::io::Result<()> {
             s.seq += 1;
             let id = s.seq;
             let text = |k: &str| hello[k].as_str().unwrap_or_default().to_owned();
-            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, lesson: 0, briefed: HashSet::new() });
+            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, lesson: 0, briefed: HashSet::new() });
             if s.active.is_none() {
                 s.active = Some(id);
             }
+            note(format!("agent {}#{id} connected in {}", text("name"), text("cwd")));
             bridge.changed(&s);
             id
         };
         writeln!(out, "{}", json!({ "id": id }))?;
         for _ in lines.by_ref() {} // blocks until the agent exits
         let mut s = bridge.lock();
+        note(format!("agent #{id} disconnected"));
         s.agents.retain(|a| a.id != id);
         if s.active == Some(id) {
             s.active = s.agents.first().map(|a| a.id);
@@ -130,20 +145,69 @@ fn serve(app: &AppHandle, stream: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
     let agent = msg["agent"].as_u64().unwrap_or_default();
-    let (text, error) = match call(app, &bridge, agent, msg["tool"].as_str().unwrap_or_default(), &msg["input"]) {
-        Ok(t) => (t, false),
-        Err(t) => (t, true),
+    let tool = msg["tool"].as_str().unwrap_or_default();
+    let started = Instant::now();
+    let (text, error, delivery) = match call(app, &bridge, agent, tool, &msg["input"], &out) {
+        Ok((t, d)) => (t, false, d),
+        Err(t) => (t, true, None),
     };
-    writeln!(out, "{}", json!({ "text": text, "error": error }))
+    let sent = !closed(&out) && writeln!(out, "{}", json!({ "text": text, "error": error })).is_ok();
+    if tool != "next" {
+        note(format!("agent #{agent} {tool} {}ms{}", started.elapsed().as_millis(), if error { format!(" error: {}", text.lines().next().unwrap_or_default()) } else { String::new() }));
+    }
+    // a learner's message counts as delivered only once the agent has actually received it
+    if let Some((lesson, learner)) = delivery {
+        if sent {
+            note(format!("agent #{agent} received the learner's message (lesson {lesson})"));
+            crate::record(app, lesson, json!({ "role": "user", "content": learner })).map_err(std::io::Error::other)?;
+        } else {
+            note(format!("agent #{agent} gave up on next before reading the message; it waits for the next call"));
+            let mut s = bridge.lock();
+            s.inbox.push_front((lesson, learner));
+            if let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) {
+                (a.busy, a.briefed, a.unanswered) = (false, HashSet::new(), None); // it never saw the brief either
+            }
+            bridge.changed(&s);
+        }
+    }
+    Ok(())
 }
 
-fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value) -> Result<String, String> {
+/// What `next` returns: how to teach (first time), the lesson so far (first time in this lesson), the message.
+fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, lesson: i64, text: &str) -> Result<String, String> {
+    let mut out = String::new();
+    if first {
+        out.push_str(crate::PROMPT);
+        out.push_str("\n\n---\n\n");
+    }
+    if new_lesson {
+        out.push_str(&crate::brief(app, lesson)?);
+    }
+    out.push_str(&format!("The learner says:\n\n{text}"));
+    Ok(out)
+}
+
+/// A message `next` handed over: (lesson, the learner's words), recorded only once the agent has it.
+type Delivery = Option<(i64, String)>;
+
+fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str, input: &Value, stream: &TcpStream) -> Result<(String, Delivery), String> {
     let mut s = bridge.lock();
     let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) else {
         return Err("rlearn restarted. Call next again.".into());
     };
     if tool == "next" {
+        // asking again without having acted on the last message means it never really got it (an agent can
+        // end its turn while a call is still out): hand the same message over again
+        if let Some((lesson, text)) = a.unanswered.clone() {
+            (a.busy, a.waiting, a.lesson) = (true, false, lesson);
+            note(format!("agent #{agent} asked again without answering; handing the message over again"));
+            bridge.changed(&s);
+            drop(s);
+            // it may have missed the brief too, so it comes along again
+            return Ok((compose(app, true, true, lesson, &format!("(You may have missed this.) {text}"))?, None));
+        }
         (a.busy, a.waiting, a.stopped) = (false, true, false);
+        note(format!("agent #{agent} waiting for the learner"));
         bridge.changed(&s);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -151,35 +215,29 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
                 break;
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || !s.agents.iter().any(|a| a.id == agent) {
+            // an agent can abandon a call (end its turn, time out): stop waiting for it, or a message would go nowhere
+            let gone = closed(stream);
+            if left.is_zero() || gone || !s.agents.iter().any(|a| a.id == agent) {
                 if let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) {
                     a.waiting = false;
                 }
+                note(format!("agent #{agent} stopped waiting ({})", if gone { "it dropped the call" } else { "timed out; it should ask again" }));
                 bridge.changed(&s);
-                return Ok("Nothing from the learner yet. Call next again.".into());
+                return Ok(("Nothing from the learner yet. Call next again.".into(), None));
             }
-            s = bridge.cv.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+            s = bridge.cv.wait_timeout(s, left.min(Duration::from_secs(1))).unwrap_or_else(|e| e.into_inner()).0;
         }
         let (lesson, text) = s.inbox.pop_front().unwrap_or_default();
         let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rlearn restarted. Call next again.")?;
         let first = a.briefed.is_empty();
         let new_lesson = a.briefed.insert(lesson);
-        (a.lesson, a.busy, a.waiting) = (lesson, true, false);
+        (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some((lesson, text.clone())));
         bridge.changed(&s);
         drop(s);
-        let mut out = String::new();
-        if first {
-            out.push_str(crate::PROMPT);
-            out.push_str("\n\n---\n\n");
-        }
-        if new_lesson {
-            out.push_str(&crate::brief(app, lesson)?);
-        }
-        crate::record(app, lesson, json!({ "role": "user", "content": text }))?;
-        out.push_str(&format!("The learner says:\n\n{text}"));
-        return Ok(out);
+        return Ok((compose(app, first, new_lesson, lesson, &text)?, Some((lesson, text))));
     }
     // a lesson tool: the page runs it and answers with a tool_result
+    a.unanswered = None;
     if a.stopped {
         return Err("The learner pressed stop. Drop what you were doing, don't send anything else, and call next to wait for them.".into());
     }
@@ -211,7 +269,7 @@ fn call(app: &AppHandle, bridge: &Bridge, agent: u64, tool: &str, input: &Value)
     crate::record(app, lesson, json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": use_id, "name": tool, "input": input }] }))?;
     crate::record(app, lesson, json!({ "role": "user", "content": [result.clone()] }))?;
     let text = result["content"].as_str().unwrap_or_default().to_owned();
-    if result["is_error"] == true { Err(text) } else { Ok(text) }
+    if result["is_error"] == true { Err(text) } else { Ok((text, None)) }
 }
 
 // ---------- commands for the page ----------
@@ -232,6 +290,8 @@ pub fn agent_send(bridge: tauri::State<Bridge>, lesson: i64, text: String) -> Re
         return Err("No agent is running. Open the terminal and start one.".into());
     }
     s.inbox.push_back((lesson, text));
+    let waiting = s.agents.iter().any(|a| Some(a.id) == s.active && a.waiting);
+    note(format!("learner message queued for lesson {lesson}{}", if waiting { "" } else { "; the agent isn't waiting for one right now" }));
     bridge.changed(&s);
     Ok(())
 }
@@ -252,8 +312,9 @@ pub fn agent_stop(bridge: tauri::State<Bridge>) {
     let active = s.active;
     s.inbox.clear();
     if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == active) {
-        (a.stopped, a.busy) = (true, false);
+        (a.stopped, a.busy, a.unanswered) = (true, false, None);
     }
+    note("learner pressed stop");
     bridge.changed(&s);
 }
 
@@ -263,5 +324,91 @@ pub fn agent_use(bridge: tauri::State<Bridge>, id: u64) {
     if s.agents.iter().any(|a| a.id == id) {
         s.active = Some(id);
         bridge.changed(&s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    struct Agent {
+        port: u16,
+        token: String,
+        id: u64,
+        _presence: TcpStream,
+    }
+
+    impl Agent {
+        fn join(dir: &std::path::Path) -> Agent {
+            let info: Value = serde_json::from_str(&std::fs::read_to_string(file(dir)).unwrap()).unwrap();
+            let (port, token) = (info["port"].as_u64().unwrap() as u16, info["token"].as_str().unwrap().to_owned());
+            let mut presence = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            writeln!(presence, "{}", json!({ "token": token, "hello": { "name": "codex-mcp-client", "cwd": "/tmp", "cmd": "" } })).unwrap();
+            let mut line = String::new();
+            BufReader::new(presence.try_clone().unwrap()).read_line(&mut line).unwrap();
+            let id = serde_json::from_str::<Value>(&line).unwrap()["id"].as_u64().unwrap();
+            Agent { port, token, id, _presence: presence }
+        }
+        /// Starts a tool call; the reply is read from the returned stream.
+        fn call(&self, tool: &str) -> TcpStream {
+            let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+            writeln!(s, "{}", json!({ "token": self.token, "agent": self.id, "tool": tool, "input": {} })).unwrap();
+            s
+        }
+    }
+
+    fn reply(s: TcpStream) -> String {
+        let mut out = String::new();
+        BufReader::new(s).read_to_string(&mut out).unwrap();
+        serde_json::from_str::<Value>(&out).map(|v| v["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default()
+    }
+
+    fn app(name: &str) -> (tauri::App<tauri::test::MockRuntime>, std::path::PathBuf) {
+        let app = tauri::test::mock_app();
+        let dir = std::env::temp_dir().join(format!("rlearn-bridge-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = crate::db::open(&dir.join("test.db")).unwrap();
+        c.execute_batch("INSERT INTO folders (id, name) VALUES (1, 'Somali'); INSERT INTO lessons (id, folder_id, title, updated) VALUES (1, 1, 'Greetings', 0);").unwrap();
+        app.manage(crate::Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
+        app.manage(Bridge::start(app.handle(), &dir).unwrap());
+        (app, dir)
+    }
+
+    fn send(app: &tauri::App<tauri::test::MockRuntime>, text: &str) {
+        agent_send(app.state::<Bridge>(), 1, text.into()).unwrap();
+    }
+
+    fn history(app: &tauri::App<tauri::test::MockRuntime>) -> usize {
+        crate::db::messages(&*app.state::<crate::Store>().db().unwrap(), 1).unwrap().len()
+    }
+
+    #[test]
+    fn a_message_survives_an_agent_that_drops_its_call() {
+        let (app, dir) = app("dropped");
+        let agent = Agent::join(&dir);
+        // the agent asks, then gives up on the call (ends its turn) before the learner writes
+        let first = agent.call("next");
+        std::thread::sleep(Duration::from_millis(300));
+        first.shutdown(std::net::Shutdown::Both).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        send(&app, "Hello, teach me");
+        // asking again gets the message: it wasn't handed to the dropped call
+        let text = reply(agent.call("next"));
+        assert!(text.ends_with("The learner says:\n\nHello, teach me"), "{text}");
+        assert_eq!(history(&app), 1, "recorded once, when it was received");
+    }
+
+    #[test]
+    fn an_agent_that_asks_again_without_answering_gets_the_message_again() {
+        let (app, dir) = app("again");
+        let agent = Agent::join(&dir);
+        send(&app, "What does iska warran mean?");
+        assert!(reply(agent.call("next")).contains("iska warran"));
+        // it never acted on it (its call was lost on its side) and asks again
+        let again = reply(agent.call("next"));
+        assert!(again.contains("You may have missed this") && again.contains("iska warran"), "{again}");
+        assert_eq!(history(&app), 1, "the repeat isn't a second message");
     }
 }
