@@ -73,8 +73,11 @@ jobs:
           if-no-files-found: ignore
       - name: Build frontend for Tauri context
         run: npm run build
+      - name: Compile native release tests
+        run: cargo test --release --no-run --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Rust tests on the native platform
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        timeout-minutes: 3
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Build installers
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Built app tool server check

@@ -65,7 +65,7 @@ and SQLite reload. Build Linux installers with `npm run tauri build -- --bundles
 ## Cross-platform releases
 
 Push a version tag matching `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` (for example
-`v0.1.1`). `.github/workflows/release.yml` runs Chromium and WebKit lesson/layout tests, native Rust
+`v0.1.2`). `.github/workflows/release.yml` runs Chromium and WebKit lesson/layout tests, native Rust
 tests and installer builds on Apple Silicon, Intel Mac, Windows x64 and Linux x64. A separate check
 runs the Linux AppImage tool server on current Arch Linux. Only when every job passes are all six
 installers and their checksums published as a private preview release. Screenshots and installers

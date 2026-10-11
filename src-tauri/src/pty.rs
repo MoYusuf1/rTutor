@@ -1,7 +1,7 @@
 //! The terminal panel: one real shell in a pseudo-terminal, alive for as long as the app runs.
 //! The page keeps a single xterm.js instance, so its scrollback survives hiding the panel.
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use tauri::{ipc::Channel, AppHandle, Manager};
@@ -12,7 +12,8 @@ pub struct Term(Mutex<Option<Session>>);
 struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Box<dyn ChildKiller + Send + Sync>,
+    id: u64,
 }
 
 impl Drop for Session {
@@ -60,11 +61,15 @@ pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> 
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         cmd.cwd(home);
     }
-    let child = pair.slave.spawn_command(cmd).map_err(err)?;
+    let mut child = pair.slave.spawn_command(cmd).map_err(err)?;
     drop(pair.slave); // the shell holds the only copy, so its exit closes the pty
     let mut reader = pair.master.try_clone_reader().map_err(err)?;
     let writer = pair.master.take_writer().map_err(err)?;
 
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *slot = Some(Session { master: pair.master, writer, child: child.clone_killer(), id });
+    drop(slot);
     let handle = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -72,17 +77,31 @@ pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> 
         while let Ok(n @ 1..) = reader.read(&mut buf) {
             pending.extend_from_slice(&buf[..n]);
             let text = take_text(&mut pending);
-            if !text.is_empty() && out.send(text).is_err() {
-                break;
+            if !text.is_empty() {
+                // Keep draining even if the window closes: ConPTY teardown can emit a final frame.
+                let _ = out.send(text);
             }
         }
         let _ = out.send("\r\n\x1b[2m[shell exited; reopen the terminal to start a new one]\x1b[0m\r\n".into());
-        if let Ok(mut slot) = handle.state::<Term>().0.lock() {
-            *slot = None;
-        }
+        finish_session(&handle, id);
     });
-    *slot = Some(Session { master: pair.master, writer, child });
+    // On Windows, the read pipe stays open until the pseudoconsole is closed. Wait for the
+    // shell independently, then close its session while the reader still drains final output.
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        finish_session(&handle, id);
+    });
     Ok(())
+}
+
+fn finish_session(app: &AppHandle, id: u64) {
+    let term = app.state::<Term>();
+    let session = term.0.lock().ok().and_then(|mut slot| {
+        if slot.as_ref().is_some_and(|s| s.id == id) { slot.take() } else { None }
+    });
+    // Closing ConPTY can block while output drains; never hold the state lock during it.
+    drop(session);
 }
 
 #[tauri::command]
@@ -112,26 +131,46 @@ mod tests {
     fn a_real_shell_runs_in_a_pty() {
         use portable_pty::{native_pty_system, CommandBuilder};
         use std::io::{Read, Write};
+        use std::sync::{mpsc, Arc, Mutex};
         let pair = native_pty_system().openpty(super::size(80, 24)).unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let reply = writer.clone();
+        let (tx, rx) = mpsc::channel();
+        // A real terminal (xterm in the app) answers ConPTY's inherited-cursor query.
+        // Service output before spawning the shell, and continue through console teardown.
+        let drain = std::thread::spawn(move || {
+            let (mut out, mut buf) = (String::new(), [0u8; 4096]);
+            let mut answered = false;
+            let mut reported = false;
+            while let Ok(n @ 1..) = reader.read(&mut buf) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if !answered && out.contains("\x1b[6n") {
+                    reply.lock().unwrap().write_all(b"\x1b[1;1R").unwrap();
+                    answered = true;
+                }
+                if !reported && out.contains("rlearn-42") {
+                    let _ = tx.send(());
+                    reported = true;
+                }
+            }
+        });
         #[cfg(windows)]
         let shell = "cmd.exe";
         #[cfg(not(windows))]
         let shell = "sh";
         let mut child = pair.slave.spawn_command(CommandBuilder::new(shell)).unwrap();
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let mut writer = pair.master.take_writer().unwrap();
         #[cfg(windows)]
-        writer.write_all(b"set /a rlearn_result=40+2\r\necho rlearn-%rlearn_result%\r\nexit\r\n").unwrap();
+        writer.lock().unwrap().write_all(b"set /a rlearn_result=40+2\r\necho rlearn-%rlearn_result%\r\nexit\r\n").unwrap();
         #[cfg(not(windows))]
-        writer.write_all(b"echo rlearn-$((40 + 2))\nexit\n").unwrap();
-        let (mut out, mut buf) = (String::new(), [0u8; 4096]);
-        while let Ok(n @ 1..) = reader.read(&mut buf) {
-            out.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if out.contains("rlearn-42") { break; }
-        }
+        writer.lock().unwrap().write_all(b"echo rlearn-$((40 + 2))\nexit\n").unwrap();
+        let result = rx.recv_timeout(std::time::Duration::from_secs(20));
         let _ = child.kill();
-        assert!(out.contains("rlearn-42"), "{out}"); // the shell evaluated the command, not just echoed it
+        drop(writer);
+        drop(pair.master);
+        drain.join().unwrap();
+        assert!(result.is_ok(), "The shell did not evaluate the command within 20 seconds: {result:?}");
     }
 
     #[test]

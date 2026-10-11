@@ -4,7 +4,7 @@ Downloads:
 - Apple Silicon Macs: `aarch64.dmg`.
 - Intel Macs: `x64.dmg`.
 - Windows x64: `x64-setup.exe` or `x64_en-US.msi`.
-- Linux x86_64, including Arch: `amd64.AppImage`. Make it executable before launching. If FUSE is unavailable, use `APPIMAGE_EXTRACT_AND_RUN=1 ./rlearn_0.1.1_amd64.AppImage`.
+- Linux x86_64, including Arch: `amd64.AppImage`. Make it executable before launching. If FUSE is unavailable, use `APPIMAGE_EXTRACT_AND_RUN=1 ./rlearn_0.1.2_amd64.AppImage`.
 - Debian-based Linux: `amd64.deb`.
 - `SHA256SUMS` verifies all installers.
 
@@ -17,3 +17,5 @@ macOS uses ad-hoc signing, without Apple notarization. Windows installers are un
 macOS and Windows now use native secure credential stores; the terminal chooses the platform shell. CLI discovery includes common user and Homebrew installation paths. Install and sign in to your chosen CLI separately. API providers require your own model ID and key.
 
 This is a private desktop preview, downloadable by repository collaborators. It is not a hosted website.
+
+Windows terminal lifecycle now services ConPTY teardown while draining output. The native PTY regression test answers cursor-position queries like the app’s xterm terminal and has bounded execution.
