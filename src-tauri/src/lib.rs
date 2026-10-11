@@ -223,6 +223,13 @@ fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<Strin
     let c = store.db()?;
     let l = db::lesson(&c, lesson)?;
     let mut s = format!("# Lesson: {}\n\n", l["title"].as_str().unwrap_or_default());
+    if let Some(dir) = lesson_dir(&c, lesson)? {
+        s.push_str(&format!(
+            "Its folder is {} (lesson.md is the canvas so far, notes.md your lesson notes). rTutor keeps these files; \
+             change them only through its tools. The subject's material is in ../sources.\n\n",
+            dir.display()
+        ));
+    }
     let sections: Vec<&str> = l["sections"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let state = l["state"].as_str().unwrap_or_default();
     if sections.is_empty() {
@@ -365,7 +372,38 @@ async fn send(
 
 #[tauri::command]
 fn tree(store: State<Store>) -> Res<Value> {
-    db::tree(&*store.db()?)
+    let mut t = db::tree(&*store.db()?)?;
+    // each subject's folder on disk: where its agent runs
+    for f in t["folders"].as_array_mut().into_iter().flatten() {
+        if f["parent"].is_null() {
+            f["dir"] = json!(material::subject_dir(f["name"].as_str().unwrap_or_default()).display().to_string());
+        }
+    }
+    Ok(t)
+}
+
+// ---------- lesson folders: ~/rtutor/<subject>/<lesson>/ mirrors each lesson as files ----------
+
+/// The lesson's folder, made (and remembered) the first time it's needed. None for a lesson outside a subject.
+fn lesson_dir(c: &Connection, lesson: i64) -> Res<Option<std::path::PathBuf>> {
+    let (dir, title): (String, String) = c.query_row("SELECT dir, title FROM lessons WHERE id = ?1", [lesson], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
+    if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
+        return Ok(Some(dir.into()));
+    }
+    let Some((_, subject, _)) = db::subject_of_lesson(c, lesson)? else { return Ok(None) };
+    let dir = material::fresh_dir(&material::subject_dir(&subject), &title);
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    exec(c, "UPDATE lessons SET dir = ?2 WHERE id = ?1", params![lesson, dir.display().to_string()])?;
+    Ok(Some(dir))
+}
+
+/// Writes the whole lesson into its folder: the canvas as lesson.md, the tutor's notes as notes.md.
+fn mirror_lesson(c: &Connection, lesson: i64) -> Res<()> {
+    let Some(dir) = lesson_dir(c, lesson)? else { return Ok(()) };
+    let l = db::lesson(c, lesson)?;
+    let sections: Vec<&str> = l["sections"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    std::fs::write(dir.join("lesson.md"), format!("{}\n", sections.join("\n\n"))).map_err(err)?;
+    std::fs::write(dir.join("notes.md"), l["state"].as_str().unwrap_or_default()).map_err(err)
 }
 
 #[tauri::command]
@@ -393,17 +431,41 @@ fn create_lesson(store: State<Store>, folder: Option<i64>, title: String) -> Res
 
 #[tauri::command]
 fn add_section(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
-    exec(&*store.db()?, "INSERT INTO sections (lesson_id, markdown) VALUES (?1, ?2)", params![lesson, markdown]).map(drop)
+    let c = store.db()?;
+    exec(&c, "INSERT INTO sections (lesson_id, markdown) VALUES (?1, ?2)", params![lesson, markdown])?;
+    // appended, not rewritten: each new section costs the same however long the lesson gets
+    if let Some(dir) = lesson_dir(&c, lesson)? {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("lesson.md")).map_err(err)?;
+        write!(f, "{markdown}\n\n").map_err(err)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn set_state(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
-    exec(&*store.db()?, "UPDATE lessons SET state = ?2 WHERE id = ?1", params![lesson, markdown]).map(drop)
+    let c = store.db()?;
+    exec(&c, "UPDATE lessons SET state = ?2 WHERE id = ?1", params![lesson, markdown])?;
+    if let Some(dir) = lesson_dir(&c, lesson)? {
+        std::fs::write(dir.join("notes.md"), &markdown).map_err(err)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn rename_lesson(store: State<Store>, id: i64, title: String) -> Res<()> {
-    exec(&*store.db()?, "UPDATE lessons SET title = ?2 WHERE id = ?1", params![id, title]).map(drop)
+    let c = store.db()?;
+    exec(&c, "UPDATE lessons SET title = ?2 WHERE id = ?1", params![id, title])?;
+    // the folder follows the name
+    let dir: String = c.query_row("SELECT dir FROM lessons WHERE id = ?1", [id], |r| r.get(0)).map_err(err)?;
+    let old = std::path::Path::new(&dir);
+    if let Some(parent) = old.parent().filter(|_| old.is_dir()) {
+        let new = material::fresh_dir(parent, &title);
+        if std::fs::rename(old, &new).is_ok() {
+            exec(&c, "UPDATE lessons SET dir = ?2 WHERE id = ?1", params![id, new.display().to_string()])?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -413,7 +475,11 @@ fn bookmark_lesson(store: State<Store>, id: i64, on: bool) -> Res<()> {
 
 #[tauri::command]
 fn delete_lesson(store: State<Store>, id: i64) -> Res<()> {
-    exec(&*store.db()?, "DELETE FROM lessons WHERE id = ?1", [id])?;
+    let c = store.db()?;
+    let dir: String = c.query_row("SELECT dir FROM lessons WHERE id = ?1", [id], |r| r.get(0)).unwrap_or_default();
+    exec(&c, "DELETE FROM lessons WHERE id = ?1", [id])?;
+    material::remove_lesson_dir(&dir);
+    drop(c);
     store.forget(Some(id));
     Ok(())
 }
@@ -456,6 +522,7 @@ fn rename_folder(store: State<Store>, id: i64, name: String) -> Res<()> {
         // the files moved with their folder
         let (from, to) = (material::subject_dir(&old).display().to_string(), material::subject_dir(&name).display().to_string());
         exec(&c, "UPDATE sources SET file = ?2 || substr(file, length(?1) + 1) WHERE file LIKE ?1 || '%'", params![from, to])?;
+        exec(&c, "UPDATE lessons SET dir = ?2 || substr(dir, length(?1) + 1) WHERE dir LIKE ?1 || '%'", params![from, to])?;
     }
     store.forget(None);
     Ok(())
@@ -465,7 +532,13 @@ fn rename_folder(store: State<Store>, id: i64, name: String) -> Res<()> {
 fn delete_folder(store: State<Store>, id: i64) -> Res<()> {
     let c = store.db()?;
     let files = db::files_within(&c, id)?;
+    let lesson_dirs: Vec<String> = c
+        .prepare("WITH RECURSIVE down(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM folders f JOIN down ON f.parent_id = down.id)
+                  SELECT dir FROM lessons WHERE folder_id IN (SELECT id FROM down)")
+        .and_then(|mut q| q.query_map([id], |r| r.get(0))?.collect())
+        .map_err(err)?;
     exec(&c, "DELETE FROM folders WHERE id = ?1", [id])?; // cascades to everything inside
+    lesson_dirs.iter().for_each(|d| material::remove_lesson_dir(d));
     material::remove_files(&files);
     drop(c);
     store.forget(None);
@@ -682,6 +755,11 @@ pub fn run() {
             let c = db::open(&dir.join("rtutor.db"))?;
             renamed_paths(&c);
             relocate_sources(&c);
+            // lessons made before they had folders get one, with their page and notes written out
+            let pending: Vec<i64> = c.prepare("SELECT id FROM lessons WHERE dir = ''").and_then(|mut q| q.query_map([], |r| r.get(0))?.collect()).unwrap_or_default();
+            for id in pending {
+                let _ = mirror_lesson(&c, id);
+            }
             app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())

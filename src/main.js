@@ -786,6 +786,8 @@ async function openLesson(id) {
   lesson.last = last?.role === "assistant" ? last.content : null;
   renderSidebar();
   renderSuggest();
+  ensureAgent();
+  showWho();
   if (lesson.id === agentLesson && agentThinking()) thinking(true);
   if (!usingAgent() && pendingCalls().length) runLoop(); // closed in the middle of a quiz: ask it again
 }
@@ -1186,7 +1188,39 @@ let sentWaiting = false;
 let lastSent = ""; // a message was sent and the agent hasn't picked it up yet
 
 const usingAgent = () => settings.active === "agent";
-const agentThinking = () => sentWaiting || !!agents.find((a) => a.id === activeAgent)?.busy;
+
+/** A subject's folder (~/rtutor/<subject>): where its agent runs. */
+function subjectDir(folder) {
+  let f = folderById(folder);
+  while (f?.parent != null) f = folderById(f.parent);
+  return f?.dir ?? "";
+}
+const within = (cwd = "", dir = "") => !!dir && (cwd === dir || cwd.startsWith(`${dir}/`) || cwd.startsWith(`${dir}\\`));
+/** The agent teaching lesson `l`: the one in its subject's folder, else the active one (if its own isn't starting). */
+function agentFor(l = lesson) {
+  const dir = l ? subjectDir(l.folder) : "";
+  return agents.find((a) => within(a.cwd, dir)) ?? (startingDirs.has(dir) ? undefined : agents.find((a) => a.id === activeAgent));
+}
+const startingDirs = new Set(); // subject folders whose agent rTutor is starting
+
+/** Opening or messaging a lesson: start its subject's agent there if it has none (with the agent picked to start automatically). */
+async function ensureAgent(l = lesson) {
+  const dir = l && subjectDir(l.folder);
+  const kind = settings.main?.kind;
+  if (!dir || !kind || !usingAgent() || agents.some((a) => within(a.cwd, dir)) || startingDirs.has(dir) || tabs.some((t) => t.cwd === dir)) return;
+  startingDirs.add(dir);
+  const tab = await newTab(dir, quickStarts()[kind][2]);
+  invoke("log_note", { line: `starting ${quickStarts()[kind][0]} for ${short(dir)}` }).catch(() => {});
+  // it starts out of sight; if it isn't listening soon it's probably asking something, so show its terminal
+  setTimeout(() => {
+    startingDirs.delete(dir);
+    if (agents.some((a) => within(a.cwd, dir) && (a.waiting || a.busy))) return;
+    invoke("log_note", { line: `the agent for ${short(dir)} isn't listening after 25s; showing its terminal` }).catch(() => {});
+    setDrawer(true, { where: false });
+    selectTab(tab);
+  }, 25000);
+}
+const agentThinking = () => sentWaiting || !!agentFor()?.busy;
 
 const agentEvents = new Channel();
 agentEvents.onmessage = async (e) => {
@@ -1194,7 +1228,8 @@ agentEvents.onmessage = async (e) => {
     const before = new Set(agents.map((a) => a.id));
     agents = e.agents;
     activeAgent = e.active;
-    if (agents.find((a) => a.id === activeAgent)?.busy) sentWaiting = false;
+    for (const a of agents) for (const d of startingDirs) if (within(a.cwd, d)) startingDirs.delete(d);
+    if (agentFor()?.busy) sentWaiting = false;
     if (lesson?.id === agentLesson) thinking(!openCard && agentThinking());
     setWorking();
     for (const a of agents) if (!before.has(a.id)) connected(a);
@@ -1222,19 +1257,19 @@ function connected(a) {
   const cmd = launched.get(a.cwd) || a.cmd;
   const main = settings.main;
   const kind = kindOf(cmd);
-  if (!cmd || (main && main.cwd === a.cwd && (kind ? main.kind === kind : main.cmd === cmd)) || settings.asked?.includes(kind ?? cmd)) return;
+  if (!kind || main?.kind === kind || settings.asked?.includes(kind)) return;
   const box = $("#offer");
-  box.replaceChildren(el("p", "", `${look.label} is live. Start it automatically whenever rTutor opens?`));
+  box.replaceChildren(el("p", "", `${look.label} is live. Start it automatically for each subject you open?`));
   const row = el("div", "offer-row");
   const yes = el("button", "primary", "Start it automatically");
   const no = el("button", "", "Not now");
   yes.onclick = () => {
-    settings.main = { cwd: a.cwd, cmd, name: a.name, kind };
+    settings.main = { name: a.name, kind };
     saveSettings();
     box.hidden = true;
   };
   no.onclick = () => {
-    settings.asked = [...(settings.asked ?? []), kind ?? cmd];
+    settings.asked = [...(settings.asked ?? []), kind];
     saveSettings();
     box.hidden = true;
   };
@@ -1258,7 +1293,7 @@ function setWorking() {
 }
 
 /** The agent's own terminal tab, when it runs in one of rTutor's. */
-const agentTab = (a = agents.find((x) => x.id === activeAgent)) => a && tabs.find((t) => t.cwd === a.cwd);
+const agentTab = (a = agentFor()) => a && tabs.find((t) => t.cwd === a.cwd);
 const NUDGE = "Call the rTutor next tool now and keep tutoring through rTutor's tools.";
 
 async function stop() {
@@ -1266,7 +1301,7 @@ async function stop() {
   if (apiBusy === lesson.id) await invoke("stop_turn", { lesson: lesson.id }).catch(() => {});
   if (usingAgent()) {
     sentWaiting = false;
-    await invoke("agent_stop").catch(() => {});
+    await invoke("agent_stop", { id: agentFor()?.id ?? null }).catch(() => {});
     // interrupt it right away (Esc stops Claude Code and Codex mid-thought), then send it back to listening
     const tab = agentTab();
     if (tab) {
@@ -1291,15 +1326,16 @@ async function send(text) {
     say(text, "user");
     sentWaiting = true;
     agentLesson = lesson.id;
-    // no tutor yet: the message waits; the agent menu (bottom left) is where to start one
-    if (!agents.length) {
+    await ensureAgent();
+    // no tutor for this subject and none to start: the message waits; the agent menu is where to start one
+    if (!agentFor() && !startingDirs.has(subjectDir(lesson.folder))) {
       $("#pop").hidden = false;
       renderPop();
     } else thinking(true);
-    await invoke("agent_send", { lesson: lesson.id, text }).catch((e) => { sentWaiting = false; thinking(false); note(String(e)); });
+    await invoke("agent_send", { lesson: lesson.id, text, own: startingDirs.has(subjectDir(lesson.folder)) }).catch((e) => { sentWaiting = false; thinking(false); note(String(e)); });
     // an agent that isn't waiting in `next` won't see the message until it is reminded
     setTimeout(() => {
-      const a = agents.find((x) => x.id === activeAgent);
+      const a = agentFor();
       if (!sentWaiting || !a || a.waiting || a.busy) return;
       const tab = agentTab(a);
       // it may be asking something in its terminal (trust this folder? allow a tool?): show it
@@ -1340,7 +1376,7 @@ function showWhere() {
   $("#shells").hidden = true;
   $("#where").hidden = false;
   for (const t of tabs) t.el.hidden = true;
-  $("#where-dir").textContent = settings.cwd || library();
+  $("#where-dir").textContent = startDir || settings.cwd || library();
   $("#where-dir").title = "Choose a folder";
   const label = starting ? quickStarts()[starting][0] : null;
   $(".where-opts").hidden = !starting;
@@ -1351,7 +1387,8 @@ function showWhere() {
 $("#where-dir").onclick = async () => {
   const dir = await invoke("pick_folder").catch(() => null);
   if (dir) {
-    settings.cwd = dir;
+    if (!starting) settings.cwd = dir;
+    startDir = dir;
     $("#where-dir").textContent = dir;
     saveSettings();
   }
@@ -1359,8 +1396,9 @@ $("#where-dir").onclick = async () => {
 $("#where").onsubmit = (e) => {
   e.preventDefault();
   const run = starting ? quickStarts()[starting][2] : undefined;
-  starting = null;
-  newTab(settings.cwd || library(), run);
+  const dir = $("#where-dir").textContent || library();
+  starting = startDir = null;
+  newTab(dir, run);
 };
 
 /** ~/rtutor: every subject's material is a folder of Markdown files in here, so an agent started here can read it all. */
@@ -1387,6 +1425,7 @@ let installed = []; // coding agents found on this computer
 
 /** One click: a terminal in the library folder with the agent already starting in it. */
 let starting = null; // the agent the "where" form will start, if one was picked
+let startDir = null; // where it starts: the open subject's folder
 const modelInfo = {}; // kind → what the agent offers (its models and their effort levels), read once
 
 /** The model and effort pickers for `kind`, filled from the agent itself. Effort levels follow the model. */
@@ -1416,14 +1455,13 @@ async function fillModels(kind) {
 function startAgent(kind) {
   $("#pop").hidden = true;
   starting = kind;
+  startDir = subjectDir(lesson ? lesson.folder : target) || null;
   setDrawer(true, { where: false });
   showWhere();
 }
 
 /** Which built-in start a command line is, so a saved start always uses rTutor's current command. */
 const kindOf = (cmd = "") => (/mcp_servers\.(rtutor|rlearn)/.test(cmd) ? "codex" : /--mcp-config/.test(cmd) && /rtutor|rlearn/.test(cmd) ? "claude" : null);
-/** The command that starts the main agent: rebuilt for the built-in agents, as typed for any other. */
-const mainCommand = (m) => (m.kind && quickStarts()[m.kind] ? quickStarts()[m.kind][2] : m.cmd);
 
 async function newTab(cwd, run) {
   $("#where").hidden = true;
@@ -1621,10 +1659,10 @@ const saveSettings = () => invoke("save_settings", { settings }).catch(() => {})
 function showWho() {
   let name, sub, mark;
   if (usingAgent()) {
-    const a = agents.find((x) => x.id === activeAgent);
+    const a = agentFor();
     const look = agentLook(a?.name);
-    name = a ? look.label : "No agent";
-    sub = "";
+    name = a ? look.label : startingDirs.size ? "Starting…" : "No agent";
+    sub = a ? short(a.cwd) : "";
     mark = a ? look.logo : "terminal";
   } else {
     const p = provider();
@@ -1653,16 +1691,16 @@ async function renderPop() {
   const parts = [];
   for (const a of agents) {
     const look = agentLook(a.name);
-    const b = option(look.logo, look.label, a.cwd || "Home folder", usingAgent() && a.id === activeAgent, () => {
+    const b = option(look.logo, `${look.label} · ${short(a.cwd)}`, a.cwd || "Home folder", usingAgent() && a.id === agentFor()?.id, () => {
       settings.active = "agent";
       saveSettings();
       invoke("agent_use", { id: a.id });
       showWho();
       renderPop();
     });
-    if (settings.main?.cwd === a.cwd && settings.main?.name === a.name) {
+    if (settings.main?.kind && quickStarts()[settings.main.kind]?.[1] === look.logo) {
       const auto = el("span", "auto", "Auto");
-      auto.title = "Starts with rTutor. Click to stop that.";
+      auto.title = "Starts by itself for each subject you open. Click to stop that.";
       auto.onclick = (e) => { e.stopPropagation(); settings.main = null; saveSettings(); renderPop(); };
       b.append(auto);
     }
@@ -1841,14 +1879,5 @@ setCollapsed(store.get("learn.collapsed", false));
 await refresh();
 startNew(null);
 // the main agent starts with the app, out of sight until the learner opens the terminal
-if (settings.main) {
-  settings.main.kind ??= kindOf(settings.main.cmd); // saved before starts were rebuilt
-  const tab = await newTab(settings.main.cwd, mainCommand(settings.main));
-  // started out of sight; if it isn't listening soon, it's probably asking something: show its terminal
-  setTimeout(() => {
-    if (agents.some((a) => a.waiting || a.busy)) return;
-    invoke("log_note", { line: "the auto-started agent isn't listening after 25s; showing its terminal" }).catch(() => {});
-    setDrawer(true, { where: false });
-    selectTab(tab);
-  }, 25000);
-}
+// agents start per subject, when a lesson in it opens (ensureAgent); older settings named one command
+if (settings.main && !settings.main.kind) settings.main.kind = kindOf(settings.main.cmd);

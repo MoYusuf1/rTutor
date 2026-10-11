@@ -39,7 +39,7 @@ struct S {
     page: Option<Channel<Value>>,
     agents: Vec<Agent>,
     active: Option<u64>,
-    inbox: VecDeque<(i64, String)>, // (lesson, what the learner said) for the active agent
+    inbox: VecDeque<Item>, // what the learner said, waiting for the agent of its subject
     calls: HashMap<u64, Option<Value>>, // tool calls the page is running → its result, once there
     seq: u64,
 }
@@ -185,7 +185,8 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
         } else {
             note(format!("agent #{agent} gave up on next before reading the message; it waits for the next call"));
             let mut s = bridge.lock();
-            s.inbox.push_front((lesson, learner));
+            let dir = s.agents.iter().find(|a| a.id == agent).map(|a| a.cwd.clone()).unwrap_or_default();
+            s.inbox.push_front(Item { lesson, text: learner, dir, own: false });
             if let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) {
                 (a.busy, a.briefed, a.unanswered) = (false, HashSet::new(), None); // it never saw the brief either
             }
@@ -207,6 +208,32 @@ fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, lesson
     }
     out.push_str(&format!("The learner says:\n\n{text}"));
     Ok(out)
+}
+
+/// A learner's message waiting to be picked up.
+#[derive(Clone)]
+struct Item {
+    lesson: i64,
+    text: String,
+    dir: String, // the subject's folder: the agent running in it teaches this
+    own: bool,   // wait for the subject's own agent (one is starting), don't hand it to another
+}
+
+/// True when `cwd` is `dir` or somewhere inside it.
+fn within(cwd: &str, dir: &str) -> bool {
+    !dir.is_empty() && std::path::Path::new(cwd).starts_with(dir)
+}
+
+impl S {
+    /// Which agent a message goes to: the one running in its subject's folder, else (unless the message waits for
+    /// its own) the active agent, which teaches any subject without one.
+    fn owner(&self, item: &Item) -> Option<u64> {
+        self.agents.iter().find(|a| within(&a.cwd, &item.dir)).map(|a| a.id).or(if item.own { None } else { self.active })
+    }
+    /// The first message waiting for `agent`.
+    fn next_for(&self, agent: u64) -> Option<usize> {
+        self.inbox.iter().position(|item| self.owner(item) == Some(agent))
+    }
 }
 
 /// A message `next` handed over: (lesson, the learner's words), recorded only once the agent has it.
@@ -233,7 +260,7 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
         bridge.changed(&s);
         let deadline = Instant::now() + WAIT;
         loop {
-            if s.active == Some(agent) && !s.inbox.is_empty() {
+            if s.next_for(agent).is_some() {
                 break;
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -249,7 +276,8 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
             }
             s = bridge.cv.wait_timeout(s, left.min(Duration::from_secs(1))).unwrap_or_else(|e| e.into_inner()).0;
         }
-        let (lesson, text) = s.inbox.pop_front().unwrap_or_default();
+        let i = s.next_for(agent).unwrap_or_default();
+        let Item { lesson, text, .. } = s.inbox.remove(i).ok_or("rTutor restarted. Call next again.")?;
         let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rTutor restarted. Call next again.")?;
         let first = a.briefed.is_empty();
         let new_lesson = a.briefed.insert(lesson);
@@ -305,12 +333,20 @@ pub fn agent_listen(bridge: tauri::State<Bridge>, on_event: Channel<Value>) {
     bridge.changed(&s);
 }
 
+/// `own`: the subject's own agent is starting, so the message waits for it rather than going to another agent.
 #[tauri::command]
-pub fn agent_send(bridge: tauri::State<Bridge>, lesson: i64, text: String) -> Result<(), String> {
+pub fn agent_send<R: Runtime>(app: AppHandle<R>, bridge: tauri::State<Bridge>, lesson: i64, text: String, own: Option<bool>) -> Result<(), String> {
+    let dir = {
+        let store = app.state::<crate::Store>();
+        let c = store.db()?;
+        crate::db::subject_of_lesson(&c, lesson)?.map(|(_, name, _)| crate::material::subject_dir(&name).display().to_string()).unwrap_or_default()
+    };
     let mut s = bridge.lock();
-    s.inbox.push_back((lesson, text)); // with no agent yet, it waits for the first one to connect
-    let waiting = s.agents.iter().any(|a| Some(a.id) == s.active && a.waiting);
-    note(format!("learner message queued for lesson {lesson}{}", if waiting { "" } else { "; the agent isn't waiting for one right now" }));
+    let item = Item { lesson, text, dir, own: own.unwrap_or(false) };
+    let owner = s.owner(&item);
+    let waiting = s.agents.iter().any(|a| Some(a.id) == owner && a.waiting);
+    note(format!("learner message queued for lesson {lesson} ({}){}", item.dir, if owner.is_none() { "; no agent for this subject yet" } else if waiting { "" } else { "; its agent isn't waiting for one right now" }));
+    s.inbox.push_back(item); // with no agent yet, it waits for one to connect
     bridge.changed(&s);
     Ok(())
 }
@@ -324,13 +360,14 @@ pub fn agent_result(bridge: tauri::State<Bridge>, id: u64, result: Value) {
     }
 }
 
-/// The learner pressed stop: the active agent's next lesson tool call is refused, and unsent messages are dropped.
+/// The learner pressed stop: that agent's next lesson tool call is refused, and its unsent messages are dropped.
 #[tauri::command]
-pub fn agent_stop(bridge: tauri::State<Bridge>) {
+pub fn agent_stop(bridge: tauri::State<Bridge>, id: Option<u64>) {
     let mut s = bridge.lock();
-    let active = s.active;
-    s.inbox.clear();
-    if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == active) {
+    let agent = id.or(s.active);
+    let keep: VecDeque<Item> = s.inbox.iter().filter(|i| s.owner(i) != agent).cloned().collect();
+    s.inbox = keep;
+    if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == agent) {
         (a.stopped, a.busy, a.unanswered) = (true, false, None);
     }
     note("learner pressed stop");
@@ -384,6 +421,9 @@ mod tests {
     }
 
     fn app(name: &str) -> (tauri::App<tauri::test::MockRuntime>, std::path::PathBuf) {
+        // lesson folders go to a temporary library, never the real ~/rtutor
+        static LIBRARY: std::sync::Once = std::sync::Once::new();
+        LIBRARY.call_once(|| std::env::set_var("RTUTOR_LIBRARY", std::env::temp_dir().join(format!("rtutor-library-{}", std::process::id()))));
         let app = tauri::test::mock_app();
         let dir = std::env::temp_dir().join(format!("rtutor-bridge-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -396,11 +436,29 @@ mod tests {
     }
 
     fn send(app: &tauri::App<tauri::test::MockRuntime>, text: &str) {
-        agent_send(app.state::<Bridge>(), 1, text.into()).unwrap();
+        agent_send(app.handle().clone(), app.state::<Bridge>(), 1, text.into(), None).unwrap();
     }
 
     fn history(app: &tauri::App<tauri::test::MockRuntime>) -> usize {
         crate::db::messages(&*app.state::<crate::Store>().db().unwrap(), 1).unwrap().len()
+    }
+
+    #[test]
+    fn each_subject_goes_to_the_agent_running_in_its_folder() {
+        let agent = |id: u64, cwd: &str| super::Agent {
+            id, name: "codex".into(), cwd: cwd.into(), cmd: String::new(), busy: false, waiting: true, stopped: false,
+            unanswered: None, lesson: 0, briefed: HashSet::new(),
+        };
+        let item = |dir: &str, own: bool| Item { lesson: 1, text: "hi".into(), dir: dir.into(), own };
+        let mut s = S { agents: vec![agent(1, "/home/me/rtutor"), agent(2, "/home/me/rtutor/Somali")], active: Some(1), ..S::default() };
+        assert_eq!(s.owner(&item("/home/me/rtutor/Somali", false)), Some(2), "the Somali agent teaches Somali");
+        assert_eq!(s.owner(&item("/home/me/rtutor/Physics", false)), Some(1), "a subject without its own agent goes to the active one");
+        assert_eq!(s.owner(&item("/home/me/rtutor/Physics", true)), None, "unless its own agent is on the way");
+        s.agents[1].cwd = "/home/me/rtutor/Somali/Greetings".into();
+        assert_eq!(s.owner(&item("/home/me/rtutor/Somali", false)), Some(2), "an agent in a lesson folder belongs to its subject");
+        s.inbox.push_back(item("/home/me/rtutor/Physics", false));
+        s.inbox.push_back(item("/home/me/rtutor/Somali", false));
+        assert_eq!((s.next_for(1), s.next_for(2)), (Some(0), Some(1)));
     }
 
     #[test]

@@ -3,6 +3,40 @@ import { chromium, webkit } from "playwright";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "vite";
 
+/** Each subject has its own agent, started in the subject's folder when one of its lessons opens. */
+async function subjectFlow(browser, engine) {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    window.__opened = [];
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      unregisterCallback: () => {},
+      invoke: async (command, args = {}) => command === "term_open" ? void window.__opened.push(args) : ({
+        get_settings: { active: "agent", providers: {}, main: { kind: "codex", name: "codex-mcp-client" } },
+        mcp_command: { bin: "/opt/rtutor", home: "/home/me" },
+        tree: { folders: [{ id: 1, parent: null, name: "Somali", dir: "/home/me/rtutor/Somali" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }], sources: [] },
+        get_lesson: { title: "Greetings", folder: 1, state: "", sections: [], messages: [], toolResults: {} },
+      })[command],
+    };
+  });
+  await page.goto("http://localhost:1421");
+  await page.locator("#tree .row.folder .chev").click();
+  await page.locator("#tree .row.lesson").click();
+  await page.waitForFunction(() => window.__opened.length === 1);
+  const [opened] = await page.evaluate(() => window.__opened);
+  assert.equal(opened.cwd, "/home/me/rtutor/Somali", "the agent starts in the subject's folder");
+  assert.match(opened.run, /^codex .*mcp_servers\.rtutor/, "with the agent picked to start automatically");
+  await page.locator("#tree .row.lesson").click();
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.__opened.length), 1, "reopening the subject doesn't start a second one");
+  assert.deepEqual(errors, []);
+  await page.close();
+  console.log(`${engine} UI passed: an agent per subject, started in its folder`);
+}
+
 /** A terminal agent powers the lesson: messages go to the bridge, and its tool calls run in the page. */
 async function agentFlow(browser, engine) {
   const page = await browser.newPage();
@@ -256,6 +290,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
     console.log(`${engine} UI passed: answer ${answer}, connection success/error, quiz resume, grading, free answer, state reload`);
   }
   await agentFlow(browser, engine);
+  await subjectFlow(browser, engine);
   } finally {
     await browser.close();
   }

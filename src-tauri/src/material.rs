@@ -103,10 +103,18 @@ fn clean(name: &str) -> String {
     if s.is_empty() { "Untitled".into() } else { s }
 }
 
-/// ~/rtutor/<subject>: where a subject's material lives as files.
-pub fn subject_dir(subject: &str) -> PathBuf {
+/// ~/rtutor: the library, one folder per subject. RTUTOR_LIBRARY moves it (the tests use a temporary one).
+pub fn library() -> PathBuf {
+    if let Some(dir) = std::env::var_os("RTUTOR_LIBRARY") {
+        return dir.into();
+    }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
-    PathBuf::from(home).join("rtutor").join(clean(subject))
+    PathBuf::from(home).join("rtutor")
+}
+
+/// ~/rtutor/<subject>: where a subject's material and lessons live as files.
+pub fn subject_dir(subject: &str) -> PathBuf {
+    library().join(clean(subject))
 }
 
 /// ~/rtutor/<subject>/sources: the material itself.
@@ -133,6 +141,34 @@ pub fn write_file(subject: &str, name: &str, body: &str) -> Res<PathBuf> {
     }
     std::fs::write(&path, format!("# {name}\n\n{body}\n")).map_err(err)?;
     Ok(path)
+}
+
+/// A folder named `name` inside `parent` that doesn't exist yet ("Name", then "Name (2)", ...).
+pub fn fresh_dir(parent: &Path, name: &str) -> PathBuf {
+    let name = clean(name);
+    let name: String = name.chars().take(80).collect::<String>().trim().to_owned();
+    let mut dir = parent.join(&name);
+    for n in 2.. {
+        if !dir.exists() {
+            break;
+        }
+        dir = parent.join(format!("{name} ({n})"));
+    }
+    dir
+}
+
+/// What a lesson folder holds: rTutor's mirror of the canvas and of the tutor's lesson notes.
+pub const LESSON_FILES: [&str; 2] = ["lesson.md", "notes.md"];
+
+/// Removes a lesson folder's mirror files, and the folder once it's empty (anything else in it stays).
+pub fn remove_lesson_dir(dir: &str) {
+    if dir.is_empty() {
+        return;
+    }
+    for f in LESSON_FILES {
+        let _ = std::fs::remove_file(Path::new(dir).join(f));
+    }
+    let _ = std::fs::remove_dir(dir);
 }
 
 /// Moves a material file written before sources had their own folder into `sources/`. Returns the new path.

@@ -157,6 +157,7 @@ fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
         ("lessons", "compact_state", "TEXT NOT NULL DEFAULT ''"),
         ("sources", "file", "TEXT NOT NULL DEFAULT ''"),
         ("folders", "notes", "TEXT NOT NULL DEFAULT ''"),
+        ("lessons", "dir", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (table, col, decl) in added {
         let has: i64 = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [col], |r| r.get(0))?;

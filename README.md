@@ -31,15 +31,28 @@ well? Start with **a test**.
 Each subject (Somali, electrical engineering, an exam you're studying for) has its lessons and its
 material. Drop in a textbook, slides, notes or a video transcript once, and every lesson in that
 subject teaches from it. The tutor doesn't reread whole books: it looks up the pages it needs, and it
-keeps its own notes about the subject so a new lesson picks up where the last one left off. Your
-files are kept as plain text in `~/rtutor/<subject>/sources/`.
+keeps its own notes about the subject so a new lesson picks up where the last one left off.
+
+Everything is also kept as plain files you can open:
+
+```
+~/rtutor/
+  Somali/
+    sources/          your books and notes, as text
+    notes.md          the tutor's notes on the whole subject
+    Greetings/        one folder per lesson
+      lesson.md       the lesson so far
+      notes.md        what the tutor knows about you in this lesson
+```
 
 ## Who teaches
 
-rTutor is powered by an AI you already use. Click **Claude Code** or **Codex** when it asks you to
-choose a tutor: it starts in rTutor's terminal with the subscription you're signed into, so there's
-nothing to pay for or paste. Prefer an API key (NVIDIA, Anthropic, OpenAI and others)? Choose
-**API key** instead. You can also pick how hard it thinks: light, balanced or deep.
+rTutor is powered by an AI you already use. Click the agent button at the bottom left and start
+**Claude Code** or **Codex**: it runs in rTutor's terminal with the subscription you're signed into,
+so there's nothing to pay for or paste, and you pick its model and how hard it thinks. Each subject
+gets its own tutor, working in that subject's folder, so its memory holds that subject and nothing
+else. Say yes when rTutor offers to start it automatically, and opening a lesson is all it takes.
+Prefer an API key (NVIDIA, Anthropic, OpenAI and others)? Use the gear in the same menu.
 
 ## Get it
 
@@ -56,6 +69,13 @@ The teaching method comes from Amos Blomqvist: his video
 ---
 
 ## For developers
+
+How it fits together: a Rust core (Tauri) with a web UI. One SQLite database is the source of truth
+(subjects, lessons, chat, canvas, notes, and material split into searchable parts); `~/rtutor` mirrors it
+as files. AI agents run in terminal tabs, one per subject in its folder, and reach the app through
+`rtutor --mcp`, a tool server that talks to the running app over a local connection. Each message goes to
+the agent in its subject's folder, and the agent teaches through the tools (`next`, `write_lesson`,
+`quiz`, `search_material`, ...). API providers use the same tools directly.
 
 You need [Node.js](https://nodejs.org) and [Rust](https://rustup.rs). Run it with `npm install` and
 `npm run tauri dev`.
