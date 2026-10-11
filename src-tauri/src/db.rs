@@ -53,8 +53,11 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let c = Connection::open(path)?;
     c.pragma_update(None, "journal_mode", "WAL")?;
     c.pragma_update(None, "synchronous", "NORMAL")?;
+    // the write-ahead log is folded back into the database at startup and kept from growing past 4 MB
+    c.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
     c.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&c)?;
+    c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")?;
     Ok(c)
 }
 

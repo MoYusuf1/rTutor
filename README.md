@@ -6,25 +6,18 @@ stuck.
 
 ## How it tutors you
 
-Think of a good private teacher. They don't start by lecturing. They find out what you already know,
-make a plan, explain one thing at a time, and check you understood before moving on. rTutor works the
-same way, in four gears. You can always see which gear it's in (the little tag above the chat box)
-and switch whenever you like:
+Like a good private teacher, in four steps. The tag above the chat box always shows which one it's on,
+and you can switch any time.
 
-1. **Probing.** A few quick questions to find where your knowledge stops. If you get everything right,
-   the questions get harder until it finds the edge. That edge is where learning happens fastest.
-2. **Planning.** A short map of the ideas between what you know and what you want, in the order they
-   build on each other. You say "looks good" before it starts.
-3. **Teaching.** One idea at a time: why you need it, how it follows from what you already know, then
-   a quick question to make sure it landed. After each answer it explains, shows the idea from a new
-   angle, and only then asks the next question. Never a wall of questions.
-4. **Reviewing.** Questions across everything you've covered, to find what needs another pass.
+1. **Probing:** a few quick questions to find where your knowledge runs out. That's where you learn fastest.
+2. **Planning:** a short map from what you know to what you want, in the order the ideas build. You approve it.
+3. **Teaching:** one idea at a time: why it matters, how it follows from what you know, then a quick
+   question. After each answer it explains and shows the idea another way before the next question.
+4. **Reviewing:** questions across everything so far, to catch what needs another pass.
 
-Questions come as multiple choice, true or false, or a short answer you type yourself. Lessons are
-written on the left like pages of a book, and the chat is on the right.
-
-New to a subject? Start **from scratch**. Already know some? Let it **find what you know**. Know it
-well? Start with **a test**.
+Questions are multiple choice, true or false, or a short answer you type. The lesson builds up on the
+left like a book; you talk to the tutor on the right. New to a subject? Start **from scratch**. Know it
+already? Start with **a test**.
 
 ## Your own material
 
@@ -47,12 +40,10 @@ Everything is also kept as plain files you can open:
 
 ## Who teaches
 
-rTutor is powered by an AI you already use. Click the agent button at the bottom left and start
-**Claude Code** or **Codex**: it runs in rTutor's terminal with the subscription you're signed into,
-so there's nothing to pay for or paste, and you pick its model and how hard it thinks. Each subject
-gets its own tutor, working in that subject's folder, so its memory holds that subject and nothing
-else. Say yes when rTutor offers to start it automatically, and opening a lesson is all it takes.
-Prefer an API key (NVIDIA, Anthropic, OpenAI and others)? Use the gear in the same menu.
+An AI you already use. Pick **Claude Code** or **Codex** from the button at the bottom left: it runs with
+the subscription you're signed into, so there's nothing to pay or paste. Each subject gets its own tutor,
+so it only ever has that subject on its mind. Prefer an API key (NVIDIA, Anthropic, OpenAI…)? It's in
+the same menu.
 
 ## Get it
 
