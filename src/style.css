@@ -45,7 +45,7 @@ svg { display: block; flex-shrink: 0; }
 
 /* ---------- sidebar ---------- */
 /* The sidebar is the same paper as the lesson and chat, set apart by a hairline, and resizable like the chat. */
-:root { --side-w: 272px; }
+:root { --side-w: 300px; }
 #sidebar { position: relative; width: var(--side-w); flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg); border-right: 1px solid var(--line); }
 #side-grip { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; z-index: 7; }
 #side-grip:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px 5px, transparent 5px); }
@@ -325,3 +325,64 @@ dialog input:focus { border-color: var(--accent); }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text) 15%, transparent); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+
+/* ---------- touch-friendly sizing: tablet-sized targets on the desktop ---------- */
+body { font-size: 15px; }
+.icon { width: 38px; height: 38px; border-radius: 10px; }
+.brand { padding: 16px 12px 6px 18px; }
+.wordmark { display: flex; align-items: center; gap: 10px; font-size: 21px; }
+.mark { width: 28px; height: 28px; }
+.actions { gap: 2px; padding: 8px 10px; }
+.act { height: 44px; gap: 12px; padding: 0 12px; border-radius: 12px; font-size: 15px; }
+#search-input { height: 44px; border-radius: 12px; padding: 0 14px; font-size: 15px; }
+#side-scroll { padding: 0 10px 16px; }
+#side-scroll h3 { height: 30px; padding-left: 12px; font-size: 12.5px; letter-spacing: 0.02em; text-transform: uppercase; }
+.row { height: 40px; gap: 10px; padding: 0 12px; border-radius: 12px; font-size: 15px; }
+.row.lesson { padding-left: 14px; }
+.children { margin-left: 22px; }
+.chev { display: grid; place-items: center; width: 22px; height: 22px; margin-left: -6px; border-radius: 6px; }
+.chev:hover { background: var(--line); }
+.foot { margin: 8px 10px 12px; gap: 4px; }
+.model { padding: 10px 12px; gap: 12px; border-radius: 14px; }
+.who > span { font-size: 14.5px; }
+.who small { font-size: 12.5px; }
+#pop, #offer { left: 10px; right: 10px; bottom: 70px; border-radius: 16px; padding: 8px; }
+.opt-row { padding: 10px; border-radius: 12px; gap: 12px; }
+#pop .act { height: 44px; }
+#menu { min-width: 220px; padding: 6px; border-radius: 14px; }
+#menu button { padding: 10px 12px; border-radius: 10px; font-size: 14.5px; }
+
+.sources-btn { top: 16px; height: 40px; gap: 8px; padding: 0 14px; border-radius: 12px; font-size: 14px; color: var(--text); }
+.sources-btn #sources-count { min-width: 22px; height: 22px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: var(--hover); font-size: 12px; font-weight: 600; }
+#sources-pop { top: 64px; border-radius: 16px; padding: 10px; width: min(420px, 60%); }
+#sources-pop .mat { padding: 10px 8px 10px 10px; font-size: 14.5px; border-radius: 10px; }
+
+.suggest { gap: 8px; padding: 6px 18px 0; }
+.suggest .now, .suggest button { padding: 8px 14px; font-size: 14px; }
+.suggest .now i { width: 7px; height: 7px; }
+#composer { margin: 12px 18px 18px; padding: 10px; border-radius: 26px; gap: 10px; }
+#composer textarea { padding: 7px 0; font-size: 16px; }
+#plus, .send { width: 42px; height: 42px; }
+
+.card { padding: 20px; border-radius: 20px; gap: 10px; font-size: 16px; }
+.opt { padding: 14px 16px; border-radius: 14px; gap: 14px; }
+.opt .k { width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
+.card input { padding: 12px 14px; border-radius: 14px; font-size: 15px; }
+
+.start-box { border-radius: 20px; padding: 18px 18px 12px; }
+.start-box textarea { font-size: 17px; }
+#start-btn { padding: 10px 22px; border-radius: 12px; font-size: 15px; }
+.gear { padding: 16px 18px; border-radius: 16px; gap: 6px; }
+.gear b { font-size: 15px; } .gear span { font-size: 13.5px; }
+.mat { padding: 12px 8px 12px 14px; font-size: 15px; }
+.add { padding: 16px; border-radius: 14px; font-size: 14.5px; }
+
+.drawer-bar { padding: 6px 10px; }
+.dtab { padding: 6px 6px 6px 12px; font-size: 13.5px; border-radius: 10px; }
+.hint button:not(.link) { padding: 7px 14px; border-radius: 10px; font-size: 13.5px; }
+.where-row .primary { padding: 10px 22px; }
+.dir { padding: 10px 14px; border-radius: 12px; font-size: 14px; }
+dialog { border-radius: 20px; padding: 22px 24px 24px; width: min(460px, 92vw); }
+dialog input { padding: 11px 12px; border-radius: 12px; font-size: 15px; }
+.segmented button { padding: 8px 14px; border-radius: 10px; font-size: 14px; }
+.wide { padding: 12px; border-radius: 12px; }

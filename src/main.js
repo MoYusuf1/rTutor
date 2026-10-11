@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2 } from "lucide";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
@@ -22,24 +23,17 @@ const store = {
 
 // ---------- icons ----------
 
-const PATHS = {
-  sidebar: "M4 5h16v14H4zM9.5 5v14",
-  folder: "M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
-  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4",
-  edit: "M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z",
-  plus: "M12 5v14M5 12h14",
-  doc: "M6 3h12v18H6zM9 8h6M9 12h6M9 16h3",
-  chev: "M9 6l6 6-6 6",
-  clip: "M19.5 11.5l-7.8 7.8a4.6 4.6 0 0 1-6.5-6.5l8.2-8.2a3 3 0 0 1 4.3 4.3l-8.2 8.2a1.5 1.5 0 0 1-2.1-2.1l7.5-7.5",
-  x: "M6 6l12 12M18 6L6 18",
-  send: "M12 19V5M5.5 11.5L12 5l6.5 6.5",
-  spark: "M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6z",
-  terminal: "M4 5h16v14H4zM7.5 9.5l3 2.5-3 2.5M12.5 15h4",
-  gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+// Lucide icons (ISC): drawn on a 24px grid with one stroke weight, so every icon matches.
+const ICONS = {
+  sidebar: PanelLeft, folder: Folder, folderOpen: FolderOpen, search: Search, edit: SquarePen, plus: Plus, doc: FileText,
+  chev: ChevronRight, clip: Paperclip, x: X, send: ArrowUp, spark: Sparkles, terminal: SquareTerminal, gear: Settings2,
+  sources: LibraryBig, lesson: BookOpenText, trash: Trash2,
 };
-const icon = (name, size = 16) =>
-  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${PATHS[name]}"/></svg>`;
-for (const e of document.querySelectorAll("[data-icon]")) e.innerHTML = icon(e.dataset.icon, e.classList.contains("send") ? 18 : 16);
+const icon = (name, size = 20) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]
+    .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(" ")}/>`)
+    .join("")}</svg>`;
+for (const e of document.querySelectorAll("[data-icon]")) e.innerHTML = icon(e.dataset.icon, e.classList.contains("send") ? 20 : 20);
 
 // Provider logos (Simple Icons, CC0). Brand colors only where the mark is a color; the rest follow the text.
 const LOGOS = {
@@ -265,8 +259,8 @@ function row(kind, item) {
   const r = el("div", `row ${kind}`);
   r.dataset.kind = kind;
   r.dataset.id = item.id;
-  if (kind === "folder") r.innerHTML = `<span class="chev">${icon("chev", 12)}</span>${icon("folder", 15)}`;
-  if (kind === "source") r.innerHTML = icon("doc", 14);
+  if (kind === "folder") r.innerHTML = `<span class="chev">${icon("chev", 16)}</span>${icon(opened.has(item.id) ? "folderOpen" : "folder", 20)}`;
+  if (kind === "source") r.innerHTML = icon("doc", 18);
   r.append(el("span", "label", item.name ?? item.title));
   if (kind === "source") r.append(el("span", "side", `${Math.round(item.words / 1000) || "<1"}k`));
   if (kind === "lesson" && item.id === lesson?.id) r.classList.add("active");
@@ -310,7 +304,7 @@ $("#side-scroll").addEventListener("click", (e) => {
     else opened.add(id);
     store.set("learn.open", [...opened]);
     if (!e.target.closest(".chev")) startNew(id);
-    else r.parentElement.classList.toggle("open", opened.has(id));
+    else renderSidebar();
   } else if (kind === "lesson") openLesson(id);
   else openSource(it);
 });
@@ -500,12 +494,12 @@ function show(view) {
 
 function chip(name, words, onRemove) {
   const c = el("span", `chip${onRemove ? "" : " inherited"}`);
-  c.innerHTML = icon("doc", 13);
+  c.innerHTML = icon("doc", 18);
   c.append(el("span", "", name), el("small", "", `${Math.round(words / 1000) || "<1"}k`));
   if (onRemove) {
     const x = el("button");
     x.type = "button";
-    x.innerHTML = icon("x", 12);
+    x.innerHTML = icon("x", 16);
     x.setAttribute("aria-label", `Remove ${name}`);
     x.onclick = onRemove;
     c.append(x);
@@ -548,13 +542,13 @@ function renderStart() {
     $("#library-list").replaceChildren(
       ...materialsFor(target).map((s) => {
         const r = el("div", "mat");
-        r.innerHTML = icon("doc", 15);
+        r.innerHTML = icon("doc", 18);
         const name = el("button", "name", s.name);
         name.type = "button";
         name.onclick = () => openSource(s);
         const x = el("button", "icon");
         x.type = "button";
-        x.innerHTML = icon("x", 13);
+        x.innerHTML = icon("x", 16);
         x.title = `Remove ${s.name}`;
         x.onclick = async () => { await invoke("delete_source", { id: s.id }); await refresh(); renderStart(); };
         r.append(name, el("small", "", `${s.words.toLocaleString()} words`), x);
@@ -650,14 +644,14 @@ function renderSources() {
     ...(list.length ? [] : [el("p", "empty", "Nothing yet. Add a textbook, slides, notes or a transcript, or drop files here.")]),
     ...list.map((s) => {
       const r = el("div", "mat");
-      r.innerHTML = icon("doc", 14);
+      r.innerHTML = icon("doc", 18);
       const name = el("button", "name", s.name);
       name.type = "button";
       name.title = "Open";
       name.onclick = () => openSource(s);
       const x = el("button", "icon");
       x.type = "button";
-      x.innerHTML = icon("x", 12);
+      x.innerHTML = icon("x", 16);
       x.title = "Remove";
       x.onclick = async () => {
         if (!x.classList.contains("armed")) return x.classList.add("armed"); // a second click removes it
@@ -969,19 +963,22 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
 
 const PHASES = { probe: "Probing", plan: "Planning", teach: "Teaching", review: "Reviewing" };
 const SUGGEST = {
+  none: [["Find what I know", "Start by finding out what I already know."], ["Teach me from scratch", GEARS.scratch.tell], ["Test me", GEARS.test.tell]],
   probe: [["Start teaching", "That's enough questions about what I know. Make the plan and start teaching."], ["Test me instead", "Skip ahead and test me on this."]],
   plan: [["Looks good, start", "The plan looks good. Start teaching."], ["Change the plan", "I'd like to change the plan."]],
-  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."]],
+  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."], ["Check what I know", "Pause teaching and check what I already know about what's next."]],
   review: [["Back to teaching", "Let's go back to teaching the next part."], ["Explain my misses", "Explain the ones I got wrong."]],
 };
 
 function renderSuggest() {
   const phase = lesson?.phase;
+  // always say which gear the lesson is in, and offer the sensible next gears
   const now = el("span", "now");
-  now.append(el("i"), PHASES[phase] ?? "");
+  now.title = "The lesson's current gear";
+  now.append(el("i"), PHASES[phase] ?? "Not started");
   $("#suggest").replaceChildren(
-    ...(PHASES[phase] ? [now] : []),
-    ...(SUGGEST[phase] ?? []).map(([label, text]) => {
+    ...(lesson ? [now] : []),
+    ...(SUGGEST[phase] ?? SUGGEST.none).map(([label, text]) => {
       const b = el("button", "", label);
       b.type = "button";
       b.onclick = () => send(text);
@@ -1141,7 +1138,7 @@ function setWorking() {
   const on = working();
   const b = $("#composer .send");
   b.classList.toggle("stop", on);
-  b.innerHTML = on ? '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>' : icon("send", 18);
+  b.innerHTML = on ? '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>' : icon("send", 20);
   b.setAttribute("aria-label", on ? "Stop" : "Send");
   b.title = on ? "Stop" : "";
 }
@@ -1270,7 +1267,7 @@ async function newTab(cwd, run) {
   for (const [label, logoName, cmd] of quickStarts()) {
     const b = el("button");
     b.type = "button";
-    b.innerHTML = logo(logoName, 14);
+    b.innerHTML = logo(logoName, 18);
     b.append(label);
     b.onclick = () => {
       launched.set(cwd, cmd);
@@ -1325,12 +1322,12 @@ function renderTabs() {
     ...tabs.map((t) => {
       const b = el("div", `dtab${t === current ? " active" : ""}`);
       const a = agents.find((x) => x.cwd === t.cwd);
-      b.innerHTML = a ? logo(agentLook(a.name).logo, 12) : icon("terminal", 12);
+      b.innerHTML = a ? logo(agentLook(a.name).logo, 12) : icon("terminal", 16);
       b.append(el("span", "", short(t.cwd)));
       b.title = t.cwd || "Home folder";
       b.onclick = () => selectTab(t);
       const x = el("button", "", "");
-      x.innerHTML = icon("x", 11);
+      x.innerHTML = icon("x", 14);
       x.title = "Close terminal";
       x.onclick = (e) => { e.stopPropagation(); closeTab(t); };
       b.append(x);
@@ -1425,7 +1422,7 @@ function showWho() {
   }
   $("#who").textContent = name;
   $("#who-sub").textContent = sub;
-  $("#who-logo").innerHTML = logo(mark, 18);
+  $("#who-logo").innerHTML = logo(mark, 22);
   $("#model").classList.toggle("off", usingAgent() && !agents.length);
   if (tabs.length) renderTabs();
 }
@@ -1434,7 +1431,7 @@ async function renderPop() {
   const pop = $("#pop");
   const option = (mark, title, sub, on, run) => {
     const b = el("button", `opt-row${on ? " on" : ""}`);
-    b.innerHTML = logo(mark, 18);
+    b.innerHTML = logo(mark, 22);
     const text = el("span", "who");
     text.append(el("span", "", title), el("small", "", sub));
     b.append(text);
@@ -1453,7 +1450,7 @@ async function renderPop() {
     }));
   }
   const term = el("button", "act", "");
-  term.innerHTML = icon("terminal", 15);
+  term.innerHTML = icon("terminal", 20);
   term.append(agents.length ? "Start another agent" : "Start an agent in the terminal");
   term.onclick = () => { pop.hidden = true; openTerminal(); };
   parts.push(term);
@@ -1475,7 +1472,7 @@ async function renderPop() {
     renderPop();
   });
   const gear = el("button", "icon", "");
-  gear.innerHTML = icon("gear", 15);
+  gear.innerHTML = icon("gear", 20);
   gear.title = "API provider settings";
   gear.onclick = (e) => { e.stopPropagation(); openModel(); };
   const line = el("div", "api-row");
