@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
+import { mkdir } from "node:fs/promises";
 import { createServer } from "vite";
 
 // Exercise the real UI with deterministic IPC replies. Live Rust tests cover provider transport.
 const server = await createServer({ server: { port: 1421, strictPort: true } });
 await server.listen();
-const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 try {
+for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
+  assert.ok(["chromium", "webkit"].includes(engine), `Unknown browser: ${engine}`);
+  const browser = await ({ chromium, webkit }[engine]).launch(engine === "chromium" && process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
+  try {
   for (const answer of [1, 0, 2]) {
     const page = await browser.newPage();
     page.setDefaultTimeout(10000);
@@ -103,11 +107,35 @@ try {
     await page.locator('#tree [data-kind="lesson"]').click();
     await page.locator("#notes-body").getByText("Addition checked. Next: practice.").waitFor({ state: "attached" });
     assert.equal(await page.locator("#canvas-body h1").count(), 1);
+    for (const colorScheme of ["light", "dark"]) {
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      for (const width of [960, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.evaluate(() => document.fonts.ready);
+        const layout = await page.locator("#chat").evaluate((chat) => {
+          const input = document.querySelector("#composer");
+          const bounds = input.getBoundingClientRect();
+          const font = getComputedStyle(chat);
+          return { overflow: chat.scrollWidth > chat.clientWidth + 1, fontSize: font.fontSize,
+            visible: bounds.top >= 0 && bounds.bottom <= innerHeight, background: getComputedStyle(document.body).backgroundColor };
+        });
+        assert.equal(layout.overflow, false, `${engine}: chat overflows at ${width}`);
+        assert.equal(layout.visible, true, `${engine}: composer is clipped at ${width}`);
+        assert.equal(layout.fontSize, "16px");
+        if (process.env.UI_SCREENSHOTS && answer === 1) {
+          await mkdir(process.env.UI_SCREENSHOTS, { recursive: true });
+          await page.screenshot({ path: `${process.env.UI_SCREENSHOTS}/${engine}-${colorScheme}-${width}.png`, animations: "disabled" });
+        }
+      }
+    }
     assert.deepEqual(errors, []);
     await page.close();
-    console.log(`UI passed: answer ${answer}, connection success/error, quiz resume, grading, free answer, state reload`);
+    console.log(`${engine} UI passed: answer ${answer}, connection success/error, quiz resume, grading, free answer, state reload`);
   }
+  } finally {
+    await browser.close();
+  }
+}
 } finally {
-  await browser.close();
   await server.close();
 }

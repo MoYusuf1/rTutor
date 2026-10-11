@@ -1,0 +1,133 @@
+name: Desktop release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Test and build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+            binary: rlearn
+          - name: macos-intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+            binary: rlearn
+          - name: windows-x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            binary: rlearn.exe
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+            binary: rlearn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev libssl-dev
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+      - name: Playwright lesson and layout checks
+        run: npm run test:ui
+        env:
+          UI_BROWSERS: chromium,webkit
+          UI_SCREENSHOTS: test-results/${{ matrix.name }}
+      - name: Save UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-${{ matrix.name }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Build frontend for Tauri context
+        run: npm run build
+      - name: Rust tests on the native platform
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Build installers
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Built app tool server check
+        run: node scripts/smoke-mcp.mjs src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary }}
+      - name: Stage installers
+        run: python scripts/stage-release.py ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.name }}
+          path: release-assets/
+          retention-days: 7
+          if-no-files-found: error
+  arch:
+    name: Arch Linux AppImage check
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-linux-x64
+          path: release-assets
+      - name: Run the AppImage tool server on current Arch Linux
+        run: |
+          chmod +x release-assets/*.AppImage
+          docker run --rm -v "$PWD:/work:ro" archlinux:base bash -lc '
+            pacman -Syu --noconfirm --needed nodejs gtk3 webkit2gtk-4.1 librsvg libsecret
+            app=$(find /work/release-assets -name "*.AppImage" -print -quit)
+            test -n "$app"
+            node /work/scripts/smoke-mcp.mjs "$app"
+          '
+  publish:
+    name: Publish only after all checks pass
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, arch]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify and publish complete preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/verify-release.py
+          gh release create "$RELEASE_TAG" --draft --prerelease --verify-tag --title "rlearn $RELEASE_TAG — desktop preview" --notes-file RELEASE.md
+          gh release upload "$RELEASE_TAG" release-assets/*
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease

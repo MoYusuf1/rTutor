@@ -30,9 +30,9 @@ The teaching method comes from Amos Blomqvist: his video
 
 ## Desktop releases
 
-Download Linux installers from [GitHub Releases](https://github.com/MoYusuf1/rlearn/releases).
+Download desktop installers from [GitHub Releases](https://github.com/MoYusuf1/rlearn/releases).
 The repository and releases are private; sign in with an account that has repository access.
-Choose the AppImage for Linux or the `.deb` for Debian-based distributions. API keys and lessons stay
+Choose `aarch64.dmg` for Apple Silicon, `x64.dmg` for Intel Mac, an `.exe`/`.msi` for Windows x64, or the AppImage for Linux/Arch. A `.deb` is also built for Debian-based systems. API keys and lessons stay
 on your computer. Claude Code and Codex must be installed and signed in separately.
 
 Open **Model**, choose your provider, and click **Test connection**. The check makes a small real
@@ -61,3 +61,21 @@ CLI=codex RLEARN_MCP_BIN="$PWD/src-tauri/target/debug/rlearn" cargo test --manif
 
 The two-turn live test verifies lesson and quiz tools, answer feedback, tutor follow-up, saved state,
 and SQLite reload. Build Linux installers with `npm run tauri build -- --bundles appimage,deb`.
+
+## Cross-platform releases
+
+Push a version tag matching `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` (for example
+`v0.1.1`). `.github/workflows/release.yml` runs Chromium and WebKit lesson/layout tests, native Rust
+tests and installer builds on Apple Silicon, Intel Mac, Windows x64 and Linux x64. A separate check
+runs the Linux AppImage tool server on current Arch Linux. Only when every job passes are all six
+installers and their checksums published as a private preview release. Screenshots and installers
+remain in Actions artifacts for seven days. A manual workflow run validates builds without publishing.
+
+Mac builds are ad-hoc signed and not notarized; Windows builds are unsigned. See release notes for
+installation limitations. Playwright tests the frontend with controlled IPC, while the built-binary
+smoke test checks MCP startup; these do not replace native GUI and provider sign-in testing.
+
+For local WebKit checks: `npx playwright install --with-deps chromium webkit`, then run
+`UI_BROWSERS=chromium,webkit npm run test:ui`. Set `UI_SCREENSHOTS=test-results` to save screenshots.
+Private-repository workflows use the account's GitHub Actions allowance; hosted Mac/Windows builds
+cannot be produced locally on this Linux machine.

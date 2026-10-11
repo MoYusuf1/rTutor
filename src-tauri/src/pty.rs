@@ -51,9 +51,13 @@ pub fn term_open(app: AppHandle, cols: u16, rows: u16, out: Channel<String>) -> 
         return Ok(());
     }
     let pair = native_pty_system().openpty(size(cols, rows)).map_err(err)?;
-    let mut cmd = CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
+    #[cfg(windows)]
+    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+    #[cfg(not(windows))]
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         cmd.cwd(home);
     }
     let child = pair.slave.spawn_command(cmd).map_err(err)?;
@@ -109,10 +113,17 @@ mod tests {
         use portable_pty::{native_pty_system, CommandBuilder};
         use std::io::{Read, Write};
         let pair = native_pty_system().openpty(super::size(80, 24)).unwrap();
-        let mut child = pair.slave.spawn_command(CommandBuilder::new("sh")).unwrap();
+        #[cfg(windows)]
+        let shell = "cmd.exe";
+        #[cfg(not(windows))]
+        let shell = "sh";
+        let mut child = pair.slave.spawn_command(CommandBuilder::new(shell)).unwrap();
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
         let mut writer = pair.master.take_writer().unwrap();
+        #[cfg(windows)]
+        writer.write_all(b"set /a rlearn_result=40+2\r\necho rlearn-%rlearn_result%\r\nexit\r\n").unwrap();
+        #[cfg(not(windows))]
         writer.write_all(b"echo rlearn-$((40 + 2))\nexit\n").unwrap();
         let (mut out, mut buf) = (String::new(), [0u8; 4096]);
         while let Ok(n @ 1..) = reader.read(&mut buf) {

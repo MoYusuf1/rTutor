@@ -188,6 +188,36 @@ fn tail(s: &str) -> String {
     lines[lines.len().saturating_sub(4)..].join("\n")
 }
 
+/// Finder/desktop launchers often omit user-installed CLI locations from PATH.
+fn cli_paths() -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = std::path::PathBuf::from(home);
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".cargo/bin"));
+    }
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        paths.push(std::path::PathBuf::from(appdata).join("npm"));
+    }
+    #[cfg(not(windows))]
+    paths.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into(), "/usr/bin".into(), "/bin".into()]);
+    paths
+}
+
+fn cli_command(name: &str) -> Command {
+    let paths = cli_paths();
+    #[cfg(windows)]
+    let names = [format!("{name}.exe"), format!("{name}.cmd")];
+    #[cfg(not(windows))]
+    let names = [name.to_owned()];
+    let executable = paths.iter().flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|path| path.is_file()).unwrap_or_else(|| name.into());
+    let mut cmd = Command::new(executable);
+    if let Ok(path) = std::env::join_paths(paths) { cmd.env("PATH", path); }
+    cmd
+}
+
 pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Event>, acc: &mut Acc) -> Result<(), String> {
     let claude = p.kind == "claude-code";
     let dir = std::env::temp_dir().join("rlearn-cli"); // empty folder: the CLI sees no project files
@@ -210,7 +240,7 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
     let input;
     if claude {
         let mcp = json!({ "mcpServers": { "rlearn": { "command": exe, "args": ["--mcp"] } } }).to_string();
-        cmd = Command::new("claude");
+        cmd = cli_command("claude");
         cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--no-session-persistence"])
             // no built-in tools, no personal settings, hooks or commands: only rlearn's server and tools
             .args(["--tools", "", "--setting-sources", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", &mcp])
@@ -221,7 +251,7 @@ pub async fn run(p: &Provider, system: &str, messages: &[Value], ch: &Channel<Ev
         }
         input = format!("{}\n\n{history}", material.trim());
     } else {
-        cmd = Command::new("codex");
+        cmd = cli_command("codex");
         cmd.args(["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only"])
             .args(["-c", &format!("mcp_servers.rlearn.command={}", json!(exe)), "-c", "mcp_servers.rlearn.args=[\"--mcp\"]"])
             .env_remove("OPENAI_API_KEY");

@@ -64,12 +64,14 @@
       <article id="canvas-body"></article>
     </section>
     <aside id="chat" aria-label="Chat">
+      <header class="chat-head"><h2>Tutor</h2><span id="chat-provider"></span></header>
       <div id="log" aria-live="polite"></div>
       <div id="meter"></div>
       <form id="composer">
-        <textarea id="input" rows="1" aria-label="Message"></textarea>
+        <textarea id="input" rows="1" aria-label="Message" placeholder="Ask your tutor…"></textarea>
         <button class="send" data-icon="send" aria-label="Send"></button>
       </form>
+      <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
     </aside>
   </main>
 

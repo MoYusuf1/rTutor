@@ -765,6 +765,7 @@ function setBusy(on) {
   busy = on;
   document.body.classList.toggle("busy", on);
   $("#input").disabled = on;
+  $("#input").placeholder = on ? "Your tutor is guiding this step…" : "Ask your tutor…";
   $("#composer .send").disabled = on;
   if (!on && !$("#lesson").hidden) $("#input").focus();
 }
@@ -917,6 +918,8 @@ let chosen = settings.active;
 
 function showWho() {
   const p = provider();
+  $("#chat-provider").textContent = p.model || p.label;
+  $("#chat-provider").title = p.model || p.label;
   $("#who").textContent = p.local ? (p.model ? `${p.label} · ${p.model}` : p.label) : p.model || p.label;
 }
 
