@@ -690,7 +690,7 @@ pub fn run() {
             send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
-            pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command, pty::installed_agents,
+            pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command, pty::installed_agents, pty::agent_models,
             stop_turn, set_subject_notes, log::log_listen, log::log_note, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
         .run(tauri::generate_context!())

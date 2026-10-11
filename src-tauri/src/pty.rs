@@ -155,6 +155,58 @@ pub fn installed_agents() -> Vec<&'static str> {
     ["claude", "codex"].into_iter().filter(|bin| dirs.iter().any(|d| exts.iter().any(|e| d.join(format!("{bin}{e}")).is_file()))).collect()
 }
 
+fn home() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default())
+}
+
+/// The models an agent offers and the effort levels each supports, read from the agent itself (never a
+/// list baked into rTutor): Codex's model cache and config, Claude Code's own `--help`. `current` is the
+/// model the agent uses when none is given.
+#[tauri::command]
+pub async fn agent_models(kind: String) -> serde_json::Value {
+    use serde_json::{json, Value};
+    tauri::async_runtime::spawn_blocking(move || match kind.as_str() {
+        "codex" => {
+            let dir = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| home().join(".codex"));
+            let cache: Value = std::fs::read_to_string(dir.join("models_cache.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let models: Vec<Value> = cache["models"].as_array().into_iter().flatten()
+                .filter(|m| m["visibility"] == "list")
+                .map(|m| json!({
+                    "id": m["slug"], "name": m["display_name"], "about": m["description"], "default": m["default_reasoning_level"],
+                    "levels": m["supported_reasoning_levels"].as_array().into_iter().flatten().map(|l| l["effort"].clone()).collect::<Vec<_>>(),
+                }))
+                .collect();
+            let config = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+            let setting = |key: &str| config.lines().find_map(|l| l.trim().strip_prefix(key)?.trim_start().strip_prefix('=').map(|v| v.trim().trim_matches('"').to_owned()));
+            json!({ "models": models, "current": setting("model"), "effort": setting("model_reasoning_effort") })
+        }
+        "claude" => {
+            // `claude --help` lists the effort levels and the model aliases it accepts
+            let help = std::process::Command::new(if cfg!(windows) { "claude.cmd" } else { "claude" }).arg("--help").output()
+                .or_else(|_| std::process::Command::new(home().join(".local/bin/claude")).arg("--help").output())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let (levels, aliases) = claude_options(&help);
+            let models: Vec<Value> = aliases.iter().map(|a| json!({ "id": a, "name": a[..1].to_uppercase() + &a[1..], "levels": levels, "default": "" })).collect();
+            json!({ "models": models, "current": null, "effort": null, "levels": levels })
+        }
+        _ => json!({ "models": [] }),
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// The effort levels and model aliases in `claude --help`.
+fn claude_options(help: &str) -> (Vec<String>, Vec<String>) {
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    let after = |flag: &str| flat.split(flag).nth(1).unwrap_or_default().split(" --").next().unwrap_or_default().to_owned();
+    let levels = after("--effort <level>").split('(').nth(1).and_then(|s| s.split(')').next())
+        .map(|s| s.split(',').map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
+    let aliases = after("--model <model>").split('\'').skip(1).step_by(2).map(str::to_owned)
+        .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).collect();
+    (levels, aliases)
+}
+
 /// Picks the folder a new terminal opens in.
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle) -> Option<String> {
@@ -218,6 +270,14 @@ mod tests {
         drop(pair.master);
         drain.join().unwrap();
         assert!(result.is_ok(), "The shell did not evaluate the command within 20 seconds: {result:?}");
+    }
+
+    #[test]
+    fn claude_help_gives_its_effort_levels_and_models() {
+        let help = "  --effort <level>    Effort level for the current session\n                      (low, medium, high, xhigh, max)\n  --environment <id>  x\n  --model <model>     Model for the current session. Provide\n   an alias for the latest model (e.g.\n   'fable', 'opus', or 'sonnet') or a\n   model's full name (e.g.\n   'claude-fable-5-1').\n  --name <n>";
+        let (levels, models) = super::claude_options(help);
+        assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(models, ["fable", "opus", "sonnet"]);
     }
 
     #[test]

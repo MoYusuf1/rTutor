@@ -43,7 +43,7 @@ nothing to pay for or paste. Prefer an API key (NVIDIA, Anthropic, OpenAI and ot
 
 ## Get it
 
-Download the installer for your computer from [Releases](https://github.com/MoYusuf1/rtutor/releases):
+Download the installer for your computer from [Releases](https://github.com/MoYusuf1/rTutor/releases):
 `aarch64.dmg` for Apple Silicon Macs, `x64.dmg` for Intel Macs, the `.exe` for Windows, and the
 `.AppImage` for Linux (including Arch). Everything stays on your computer.
 

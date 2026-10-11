@@ -30,6 +30,8 @@ async function agentFlow(browser, engine) {
           case "agent_send": state.sent.push(args.text); return;
           case "agent_stop": state.stopped = true; return;
           case "installed_agents": return ["codex"];
+          case "agent_models": return { models: [{ id: "gpt-test", name: "GPT-Test", levels: ["low", "high"], default: "high" }], current: "gpt-test", effort: "low" };
+          case "save_settings": return;
           case "log_listen": return ["/tmp/rtutor.log", ["12:00:00.000Z agent connected"]];
           case "material_search": return "material 1, part 2: voltage is push per charge";
           case "agent_result": state.results[args.id] = args.result; return;
@@ -42,11 +44,15 @@ async function agentFlow(browser, engine) {
   await page.goto("http://localhost:1421");
   const emit = (e) => page.evaluate((e) => { window.__agent.onmessage(e); }, e); // a quiz call settles only once answered
   await page.locator("#who").getByText("No agent", { exact: true }).waitFor();
-  // with no tutor yet, choosing one is right on the start screen
-  await page.locator(".connect").getByText("Choose your tutor").waitFor();
-  assert.equal(await page.locator(".connect-opt.missing").count(), 1, "the agent that isn't installed says so");
+  // starting an agent: it says where it will run, with the agent's own models and effort levels
+  await page.locator("#model").click();
+  await page.locator("#pop").getByText("Start Codex").click();
+  await page.locator("#where").getByText("Where should Codex run?").waitFor();
+  await page.locator('#where-model option[value="gpt-test"]').waitFor({ state: "attached" });
+  assert.equal(await page.locator("#where-model option").first().innerText(), "Default (GPT-Test)");
+  assert.deepEqual(await page.locator("#where-effort option").allInnerTexts(), ["Default (low)", "low", "high"], "effort levels come from the model");
+  await page.locator("#drawer-close").click();
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rtutor", cmd: "", busy: false }], active: 7 });
-  await page.locator(".connect").waitFor({ state: "detached" });
   await page.locator("#who").getByText("Claude Code").waitFor();
   assert.ok(await page.locator("#who-logo svg[fill='#D97757']").count(), "the Claude logo marks the agent");
   const long = "Teach me circuits, from Ohm's law up to how a real power supply keeps its voltage steady";

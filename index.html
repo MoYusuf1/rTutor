@@ -47,7 +47,6 @@
         </div>
       </div>
       <div id="gears" class="gears" role="radiogroup" aria-label="How to start"></div>
-      <div id="connect-slot"></div>
       <section id="library" hidden>
         <h2>Material</h2>
         <div id="library-list"></div>
@@ -96,6 +95,10 @@
     </div>
     <form id="where" class="where">
       <p>Where should the terminal open?</p>
+      <div class="where-opts" hidden>
+        <label>Model <select id="where-model"></select></label>
+        <label>Effort <select id="where-effort"></select></label>
+      </div>
       <div class="where-row">
         <button type="button" id="where-dir" class="dir"></button>
         <button class="primary">Open</button>
