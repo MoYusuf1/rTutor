@@ -669,7 +669,6 @@ function toggleSources(open = $("#sources-pop").hidden) {
   $("#sources-btn").setAttribute("aria-expanded", String(open));
 }
 $("#sources-btn").onclick = () => toggleSources();
-$("#sources-add").onclick = () => attach({ folder: lesson?.folder });
 $("#plus").onclick = () => attach({ folder: lesson?.folder });
 
 function showLesson() {
@@ -1411,8 +1410,8 @@ function showWho() {
   if (usingAgent()) {
     const a = agents.find((x) => x.id === activeAgent);
     const look = agentLook(a?.name);
-    name = a ? look.label : "No agent running";
-    sub = a ? short(a.cwd) : "Open the terminal to start one";
+    name = a ? look.label : "No agent";
+    sub = "";
     mark = a ? look.logo : "terminal";
   } else {
     const p = provider();
@@ -1427,43 +1426,42 @@ function showWho() {
   if (tabs.length) renderTabs();
 }
 
+/** Who teaches: one row per running agent, one for the API provider, and a way to start another agent. */
 async function renderPop() {
   const pop = $("#pop");
-  const option = (mark, title, sub, on, run) => {
+  const option = (mark, title, tip, on, run) => {
     const b = el("button", `opt-row${on ? " on" : ""}`);
     b.innerHTML = logo(mark, 22);
-    const text = el("span", "who");
-    text.append(el("span", "", title), el("small", "", sub));
-    b.append(text);
+    b.append(el("span", "name", title));
+    b.title = tip;
     b.onclick = run;
     return b;
   };
-  const parts = [el("h4", "", "Agents")];
+  const parts = [];
   for (const a of agents) {
     const look = agentLook(a.name);
-    parts.push(option(look.logo, look.label, a.cwd || "Home folder", usingAgent() && a.id === activeAgent, () => {
+    const b = option(look.logo, look.label, a.cwd || "Home folder", usingAgent() && a.id === activeAgent, () => {
       settings.active = "agent";
       saveSettings();
       invoke("agent_use", { id: a.id });
       showWho();
       renderPop();
-    }));
+    });
+    if (settings.main?.cwd === a.cwd && settings.main?.name === a.name) {
+      const auto = el("span", "auto", "Auto");
+      auto.title = "Starts with rlearn. Click to stop that.";
+      auto.onclick = (e) => { e.stopPropagation(); settings.main = null; saveSettings(); renderPop(); };
+      b.append(auto);
+    }
+    parts.push(b);
   }
-  const term = el("button", "act", "");
-  term.innerHTML = icon("terminal", 20);
-  term.append(agents.length ? "Start another agent" : "Start an agent in the terminal");
+  const term = el("button", "opt-row");
+  term.innerHTML = icon("plus", 20);
+  term.append(el("span", "name muted", "New agent"));
+  term.title = "Start a coding agent in the terminal";
   term.onclick = () => { pop.hidden = true; openTerminal(); };
-  parts.push(term);
-  if (settings.main) {
-    const look = agentLook(settings.main.name);
-    const auto = el("p", "auto", `${look.label} starts with rlearn in ${short(settings.main.cwd)}. `);
-    const off = el("button", "link", "Stop that");
-    off.onclick = () => { settings.main = null; saveSettings(); renderPop(); };
-    auto.append(off);
-    parts.push(auto);
-  }
+  parts.push(term, el("hr"));
   const p = provider();
-  parts.push(el("h4", "", "API"));
   const api = option(p.logo, p.label, p.model || "Not set up", !usingAgent(), async () => {
     if (!(await ready())) return openModel();
     settings.active = "api";
@@ -1472,8 +1470,8 @@ async function renderPop() {
     renderPop();
   });
   const gear = el("button", "icon", "");
-  gear.innerHTML = icon("gear", 20);
-  gear.title = "API provider settings";
+  gear.innerHTML = icon("gear", 18);
+  gear.title = "API settings";
   gear.onclick = (e) => { e.stopPropagation(); openModel(); };
   const line = el("div", "api-row");
   line.append(api, gear);

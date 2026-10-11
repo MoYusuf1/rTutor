@@ -39,7 +39,7 @@ async function agentFlow(browser, engine) {
   });
   await page.goto("http://localhost:1421");
   const emit = (e) => page.evaluate((e) => { window.__agent.onmessage(e); }, e); // a quiz call settles only once answered
-  await page.locator("#who").getByText("No agent running").waitFor();
+  await page.locator("#who").getByText("No agent", { exact: true }).waitFor();
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: false }], active: 7 });
   await page.locator("#who").getByText("Claude Code").waitFor();
   assert.ok(await page.locator("#who-logo svg[fill='#D97757']").count(), "the Claude logo marks the agent");
@@ -81,7 +81,7 @@ async function agentFlow(browser, engine) {
   assert.ok(await page.evaluate(() => window.__state.stopped), "stop reaches the agent");
   await page.locator(".work.done").first().waitFor();
   await emit({ type: "agents", agents: [], active: null });
-  await page.locator("#who").getByText("No agent running").waitFor();
+  await page.locator("#who").getByText("No agent", { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   await page.close();
   console.log(`${engine} UI passed: terminal agent drives the lesson, phase shortcuts, typed quiz answer, thinking state`);
