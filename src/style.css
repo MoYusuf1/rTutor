@@ -455,3 +455,12 @@ dialog input { padding: 11px 12px; border-radius: 12px; font-size: 15px; }
 @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } }
 dialog[open] { animation: pop 0.16s ease-out; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+.answer-row { display: flex; gap: 8px; }
+.answer-row input { flex: 1; }
+.answer-row .primary { padding: 0 18px; border-radius: 14px; }
+.effort { display: flex; align-items: center; gap: 4px; padding: 6px 8px 4px 12px; }
+.effort span { flex: 1; font-size: 13px; color: var(--muted); }
+.effort button { padding: 5px 10px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.effort button:hover { background: var(--hover); color: var(--text); }
+.effort button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }

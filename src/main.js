@@ -213,7 +213,18 @@ function workLabel() {
 }
 
 function thinking(on) {
-  if (on && !work) {
+  // picking up right where the last block ended (nothing shown in between): continue that block
+  const last = log().lastElementChild;
+  if (on && !work && last?.classList.contains("work") && last.classList.contains("done")) {
+    const dots = el("span", "dots");
+    dots.append(el("i"), el("i"), el("i"));
+    last.querySelector("summary").prepend(dots);
+    last.classList.remove("done");
+    last.open = true;
+    work = { node: last, body: last.querySelector(".work-body"), label: last.querySelector("summary span:last-child"), started: Number(last.dataset.started), steps: last.querySelectorAll(".step").length, musing: musing() };
+    work.timer = setInterval(workLabel, 1000);
+    workLabel();
+  } else if (on && !work) {
     const node = el("details", "work");
     const summary = el("summary");
     const dots = el("span", "dots");
@@ -225,6 +236,7 @@ function thinking(on) {
     node.open = true; // open while it works, folded once it's done
     log().append(node);
     log().scrollTop = log().scrollHeight;
+    node.dataset.started = Date.now();
     work = { node, body, label, started: Date.now(), steps: 0, musing: musing() };
     work.timer = setInterval(workLabel, 1000);
     workLabel();
@@ -855,8 +867,18 @@ function choiceCard(kind, question, options, { note: withNote = false, free = fa
     });
     card.append(...buttons);
     if (withNote || free) {
-      extra.placeholder = free ? "Your own answer" : "Why? (optional)";
+      extra.placeholder = !options.length ? "Type your answer" : free ? "Your own answer" : "Why? (optional)";
       card.append(extra);
+    }
+    if (!options.length) {
+      // a short answer: the box is the whole card, with a button to hand it in
+      const row = el("div", "answer-row");
+      const check = el("button", "primary", "Check");
+      check.type = "button";
+      check.onclick = () => extra.value.trim() && done({ i: -1 });
+      row.append(extra, check);
+      card.append(row);
+      requestAnimationFrame(() => extra.focus());
     }
     extra.onkeydown = (e) => { if (free && e.key === "Enter" && extra.value.trim()) done({ i: -1 }); };
     card.scrollIntoView({ block: "nearest" });
@@ -865,7 +887,7 @@ function choiceCard(kind, question, options, { note: withNote = false, free = fa
       abandon: () => done({ abandoned: true }),
     };
     openCard = self;
-    $("#input").placeholder = "Or answer in your own words…";
+    $("#input").placeholder = options.length ? "Or answer in your own words…" : "Type your answer…";
     thinking(false);
     function done(r) {
       if (openCard !== self) return;
@@ -978,8 +1000,35 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     if (here) say(input.text);
     return ok("Shown in the chat.");
   }
-  if (name === "quiz" || name === "ask") {
+  if (["quiz", "ask", "true_false", "short_answer"].includes(name)) {
     if (!here) return { ...bad(LEFT), abandoned: true };
+  }
+  if (name === "true_false") {
+    const { statement, answer, explanation = "" } = input;
+    if (typeof statement !== "string" || typeof answer !== "boolean") return bad("true_false needs a statement and a boolean answer.");
+    const r = await choiceCard("quiz", statement, ["True", "False", "I don't know"], { note: true });
+    if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    if (r.i < 0) {
+      say(r.text, "user");
+      return ok(`The learner didn't pick True or False. They wrote: ${r.text}`);
+    }
+    const c = answer ? 0 : 1;
+    const picked = ["True", "False", "I don't know"][r.i];
+    const right = r.i === c;
+    r.buttons[c].classList.add("right");
+    if (!right) r.buttons[r.i].classList.add("wrong");
+    await addSection(resultCard(statement, picked, answer ? "True" : "False", right, r.text, explanation));
+    return ok(`The learner said "${picked}" (${right ? "correct" : `incorrect; the statement is ${answer ? "true" : "false"}`}).${r.text ? ` Their note: ${r.text}` : ""} The result card with your explanation is already in the lesson.`);
+  }
+  if (name === "short_answer") {
+    const { question, answer, explanation = "" } = input;
+    if (typeof question !== "string" || typeof answer !== "string") return bad("short_answer needs a question and a model answer.");
+    const r = await choiceCard("quiz short", question, [], { free: true });
+    if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    const lines = [`[!question] ${question.replace(/\s*\n\s*/g, " ")}`, `**Your answer:** ${r.text}`, `**A good answer:** ${answer}`];
+    if (explanation) lines.push("", explanation);
+    await addSection(quoted(lines.join("\n")));
+    return ok(`The learner answered: "${r.text}". Your model answer: "${answer}". Judge it yourself (equivalent wording and small spelling slips count as right) and tell them in one line; the comparison and your explanation are already on the canvas.`);
   }
   if (name === "quiz") {
     const { question, options, correct_index: c, explanation = "" } = input;
@@ -1297,13 +1346,16 @@ const library = () => (home ? `${home}${home.includes("\\") ? "\\" : "/"}rlearn`
 const short = (dir = "") => dir.split(/[\\/]/).filter(Boolean).pop() || "~";
 
 /** Commands that start each agent wired to rlearn, so a click is all it takes. */
+// How hard the tutor thinks: passed to the agent when rlearn starts it
+const EFFORTS = { low: "Light", medium: "Balanced", high: "Deep" };
 function quickStarts() {
   const bin = mcpBin.replace(/'/g, "");
+  const effort = EFFORTS[settings.effort] ? settings.effort : "medium";
   const json = JSON.stringify({ mcpServers: { rlearn: { command: bin, args: ["--mcp"] } } });
   const go = "'Call the rlearn next tool now and tutor through it.'";
   return {
-    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --mcp-config '${json}' --allowedTools mcp__rlearn ${go}`],
-    codex: ["Codex", "openai", `codex -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' ${go}`],
+    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --effort ${effort} --mcp-config '${json}' --allowedTools mcp__rlearn ${go}`],
+    codex: ["Codex", "openai", `codex -c model_reasoning_effort=${effort} -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' ${go}`],
   };
 }
 /** Which built-in start a command line is, so a saved start always uses rlearn's current command. */
@@ -1559,7 +1611,17 @@ async function renderPop() {
   term.append(el("span", "name muted", "New agent"));
   term.title = "Start a coding agent in the terminal";
   term.onclick = () => { pop.hidden = true; openTerminal(); };
-  parts.push(term, el("hr"));
+  const effort = el("div", "effort");
+  effort.title = "How hard the tutor thinks. Takes effect the next time an agent starts.";
+  effort.append(el("span", "", "Effort"));
+  for (const [id, label] of Object.entries(EFFORTS)) {
+    const b = el("button", "", label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String((settings.effort ?? "medium") === id));
+    b.onclick = (e) => { e.stopPropagation(); settings.effort = id; saveSettings(); renderPop(); };
+    effort.append(b);
+  }
+  parts.push(term, effort, el("hr"));
   const p = provider();
   const api = option(p.logo, p.label, p.model || "Not set up", !usingAgent(), async () => {
     if (!(await ready())) return openModel();

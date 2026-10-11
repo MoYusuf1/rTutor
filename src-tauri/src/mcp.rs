@@ -197,7 +197,7 @@ mod tests {
         assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
         let list = handle(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         let names: Vec<_> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(names, ["next", "write_lesson", "quiz", "update_state", "ask", "search_material", "read_material", "subject_notes", "phase", "say"]);
+        assert_eq!(names, ["next", "write_lesson", "quiz", "true_false", "short_answer", "update_state", "ask", "search_material", "read_material", "subject_notes", "phase", "say"]);
         assert!(list["result"]["tools"][2]["inputSchema"]["properties"]["correct_index"].is_object());
         let bad = handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "nope" })).unwrap();
         assert_eq!(bad["error"]["code"], -32601);

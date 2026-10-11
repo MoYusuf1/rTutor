@@ -94,6 +94,20 @@ pub fn tools() -> Vec<Value> {
                 "correct_index": { "type": "integer", "description": "0-based index of the correct option" },
                 "explanation": { "type": "string", "description": "Why the correct option is right and what the tempting wrong ones get wrong. Shown only after the learner answers." }
             })) }),
+        json!({ "name": "true_false",
+            "description": "Ask ONE graded true-or-false question in the chat pane. The app adds \"I don't know\", grades instantly, reveals your explanation and records a result card on the canvas. Good for quick checks of a single fact or a common misconception.",
+            "input_schema": obj(json!({
+                "statement": { "type": "string", "description": "A claim that is clearly true or clearly false" },
+                "answer": { "type": "boolean", "description": "Whether the statement is true" },
+                "explanation": { "type": "string", "description": "Why. Shown only after the learner answers." }
+            })) }),
+        json!({ "name": "short_answer",
+            "description": "Ask ONE question the learner answers in their own words (a word, a phrase, a translation, a sentence). The app shows their answer next to yours on the canvas; YOU judge it from the tool result (accept equivalent wording and small spelling slips) and say briefly whether it was right. Good for recall and production: harder than recognizing the answer in a list.",
+            "input_schema": obj(json!({
+                "question": { "type": "string" },
+                "answer": { "type": "string", "description": "A model answer" },
+                "explanation": { "type": "string", "description": "Why, or what to notice. Shown after the learner answers." }
+            })) }),
         json!({ "name": "update_state",
             "description": "Replace your lesson state: a short Markdown note (under ~300 words) of what the learner reliably knows, their misconceptions and recent misses, the plan's nodes with status, and the next step. Call it after the plan is agreed and after every node's quiz-check. It is what you (or another tutor model) will rely on when older turns are summarized away, so keep it accurate and complete.",
             "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),

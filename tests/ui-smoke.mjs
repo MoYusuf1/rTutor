@@ -81,6 +81,19 @@ async function agentFlow(browser, engine) {
   await page.locator(".meta").getByText("Stopped.").waitFor();
   assert.ok(await page.evaluate(() => window.__state.stopped), "stop reaches the agent");
   await page.locator(".work.done").first().waitFor();
+  // true/false is graded in the app; a short answer goes back to the tutor to judge
+  await emit({ type: "call", id: 20, agent: 7, lesson: 1, name: "true_false", input: { statement: "Voltage is a kind of current.", answer: false, explanation: "Voltage pushes; current flows." } });
+  await page.locator(".card.quiz .opt", { hasText: "False" }).click();
+  await page.waitForFunction(() => window.__state.results[20]);
+  assert.match((await page.evaluate(() => window.__state.results[20])).content, /said "False" \(correct/);
+  await page.locator("#canvas-body").getByText("Voltage pushes; current flows.").waitFor();
+  await emit({ type: "call", id: 21, agent: 7, lesson: 1, name: "short_answer", input: { question: "What carries current?", answer: "Moving charge", explanation: "" } });
+  await page.locator(".card.short input").fill("moving charges");
+  await page.locator(".card.short").getByText("Check").click();
+  await page.waitForFunction(() => window.__state.results[21]);
+  const judged = (await page.evaluate(() => window.__state.results[21])).content;
+  assert.ok(judged.includes('"moving charges"') && judged.includes("Judge it yourself"), judged);
+  await page.locator("#canvas-body").getByText("A good answer:").waitFor();
   // deleting asks first, in a dialog
   await page.locator("#tree .row.lesson").click({ button: "right" });
   await page.locator("#menu").getByText("Delete lesson").click();
