@@ -1,6 +1,6 @@
-//! How a coding agent running in a terminal (Claude Code, Codex, anything that speaks MCP) powers rlearn.
+//! How a coding agent running in a terminal (Claude Code, Codex, anything that speaks MCP) powers rTutor.
 //!
-//! The agent starts `rlearn --mcp`, which connects here over localhost. One long-lived "presence" connection
+//! The agent starts `rtutor --mcp`, which connects here over localhost. One long-lived "presence" connection
 //! per agent says it is alive (it closes when the agent exits); every tool call is its own short connection.
 //! The agent pulls the learner's messages with `next`, and its lesson tools run in the page, which answers
 //! them. A quiz call simply waits until the learner has answered.
@@ -25,7 +25,7 @@ fn closed(stream: &TcpStream) -> bool {
     gone
 }
 
-/// How long `next` waits before telling the agent to ask again. Below the tool timeouts rlearn sets up.
+/// How long `next` waits before telling the agent to ask again. Below the tool timeouts rTutor sets up.
 const WAIT: Duration = Duration::from_secs(20 * 60);
 
 pub struct Bridge {
@@ -62,7 +62,22 @@ struct Agent {
     briefed: HashSet<i64>,
 }
 
-/// Where `rlearn --mcp` finds the running app.
+/// If rTutor is already running, asks it to come forward and returns true (this launch should then exit).
+pub fn focus_running(data_dir: &std::path::Path) -> bool {
+    let ask = || -> Option<bool> {
+        let info: Value = serde_json::from_str(&std::fs::read_to_string(file(data_dir)).ok()?).ok()?;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], info["port"].as_u64()? as u16));
+        let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        writeln!(s, "{}", json!({ "token": info["token"], "focus": true })).ok()?;
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).ok()?;
+        Some(line.trim() == "ok")
+    };
+    ask().unwrap_or(false) // a stale file from a crash, or another program on that port: start normally
+}
+
+/// Where `rtutor --mcp` finds the running app.
 pub fn file(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("bridge.json")
 }
@@ -74,7 +89,7 @@ fn random() -> String {
 }
 
 impl Bridge {
-    /// Listens on a free localhost port and writes it, with a fresh token, where `rlearn --mcp` looks.
+    /// Listens on a free localhost port and writes it, with a fresh token, where `rtutor --mcp` looks.
     pub fn start<R: Runtime>(app: &AppHandle<R>, data_dir: &std::path::Path) -> std::io::Result<Bridge> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let token = random();
@@ -119,6 +134,13 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
         return Ok(()); // not ours (or a browser poking at the port)
     }
     let mut out = stream;
+    if msg.get("focus").is_some() {
+        // rTutor was opened again: bring this window forward instead of starting a second app
+        for w in app.webview_windows().into_values() {
+            let _ = (w.unminimize(), w.show(), w.set_focus());
+        }
+        return writeln!(out, "ok");
+    }
     if let Some(hello) = msg.get("hello") {
         let id = {
             let mut s = bridge.lock();
@@ -193,7 +215,7 @@ type Delivery = Option<(i64, String)>;
 fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str, input: &Value, stream: &TcpStream) -> Result<(String, Delivery), String> {
     let mut s = bridge.lock();
     let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) else {
-        return Err("rlearn restarted. Call next again.".into());
+        return Err("rTutor restarted. Call next again.".into());
     };
     if tool == "next" {
         // asking again without having acted on the last message means it never really got it (an agent can
@@ -228,7 +250,7 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
             s = bridge.cv.wait_timeout(s, left.min(Duration::from_secs(1))).unwrap_or_else(|e| e.into_inner()).0;
         }
         let (lesson, text) = s.inbox.pop_front().unwrap_or_default();
-        let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rlearn restarted. Call next again.")?;
+        let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rTutor restarted. Call next again.")?;
         let first = a.briefed.is_empty();
         let new_lesson = a.briefed.insert(lesson);
         (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some((lesson, text.clone())));
@@ -245,7 +267,7 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     if lesson == 0 {
         return Err("No lesson yet. Call next to get the learner's first message.".into());
     }
-    let Some(page) = s.page.clone() else { return Err("The rlearn window isn't ready. Try again.".into()) };
+    let Some(page) = s.page.clone() else { return Err("The rTutor window isn't ready. Try again.".into()) };
     s.seq += 1;
     let id = s.seq;
     s.calls.insert(id, None);
@@ -257,7 +279,7 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
                 None => s = bridge.cv.wait(s).unwrap_or_else(|e| e.into_inner()),
             }
         } else {
-            return Err("The rlearn window reloaded. Call next.".into());
+            return Err("The rTutor window reloaded. Call next.".into());
         }
     };
     s.calls.remove(&id);
@@ -286,10 +308,7 @@ pub fn agent_listen(bridge: tauri::State<Bridge>, on_event: Channel<Value>) {
 #[tauri::command]
 pub fn agent_send(bridge: tauri::State<Bridge>, lesson: i64, text: String) -> Result<(), String> {
     let mut s = bridge.lock();
-    if s.active.is_none() {
-        return Err("No agent is running. Open the terminal and start one.".into());
-    }
-    s.inbox.push_back((lesson, text));
+    s.inbox.push_back((lesson, text)); // with no agent yet, it waits for the first one to connect
     let waiting = s.agents.iter().any(|a| Some(a.id) == s.active && a.waiting);
     note(format!("learner message queued for lesson {lesson}{}", if waiting { "" } else { "; the agent isn't waiting for one right now" }));
     bridge.changed(&s);
@@ -366,7 +385,7 @@ mod tests {
 
     fn app(name: &str) -> (tauri::App<tauri::test::MockRuntime>, std::path::PathBuf) {
         let app = tauri::test::mock_app();
-        let dir = std::env::temp_dir().join(format!("rlearn-bridge-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rtutor-bridge-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let c = crate::db::open(&dir.join("test.db")).unwrap();
@@ -382,6 +401,14 @@ mod tests {
 
     fn history(app: &tauri::App<tauri::test::MockRuntime>) -> usize {
         crate::db::messages(&*app.state::<crate::Store>().db().unwrap(), 1).unwrap().len()
+    }
+
+    #[test]
+    fn a_second_launch_finds_the_running_app() {
+        let (_app, dir) = app("focus");
+        assert!(focus_running(&dir), "the running app answered");
+        std::fs::write(file(&dir), r#"{"port":1,"token":"stale"}"#).unwrap();
+        assert!(!focus_running(&dir), "a stale file from a crash doesn't stop a launch");
     }
 
     #[test]

@@ -307,16 +307,24 @@ function row(kind, item) {
 }
 
 function renderSidebar() {
+  // group once (O(n)), instead of filtering every list for every folder
+  const group = (list, key) => {
+    const m = new Map();
+    for (const x of list) (m.get(x[key] ?? null) ?? m.set(x[key] ?? null, []).get(x[key] ?? null)).push(x);
+    return m;
+  };
+  const folders = group(data.folders, "parent");
+  const lessons = group(data.lessons, "folder");
   const build = (parent) => {
     const frag = document.createDocumentFragment();
-    for (const f of data.folders.filter((x) => x.parent === parent)) {
+    for (const f of folders.get(parent) ?? []) {
       const wrap = el("div", `folder${opened.has(f.id) ? " open" : ""}`);
       const kids = el("div", "children");
       kids.append(build(f.id));
       wrap.append(row("folder", f), kids);
       frag.append(wrap);
     }
-    for (const l of data.lessons.filter((x) => x.folder === parent)) frag.append(row("lesson", l));
+    for (const l of lessons.get(parent) ?? []) frag.append(row("lesson", l));
     return frag;
   };
   $("#tree").replaceChildren(build(null));
@@ -589,6 +597,7 @@ function renderStart() {
       return b;
     }),
   );
+  $("#connect-slot").replaceChildren(...(usingAgent() && !agents.length ? [connectCard()] : []));
   $("#library").hidden = !subject;
   if (subject) {
     $("#library-list").replaceChildren(
@@ -1070,12 +1079,21 @@ const SUGGEST = {
   review: [["Back to teaching", "Let's go back to teaching the next part."], ["Explain my misses", "Explain the ones I got wrong."]],
 };
 
+let lastPhase = null;
+let lastPhaseLesson = null;
+
 function renderSuggest() {
   const phase = lesson?.phase;
   // always say which gear the lesson is in, and offer the sensible next gears
   const now = el("span", "now");
   now.title = "The lesson's current gear";
-  now.append(el("i"), PHASES[phase] ?? "Not started");
+  const dot = el("i");
+  now.append(dot, el("b", "", PHASES[phase] ?? ""));
+  // a new gear arrives with a little flourish; the same gear just stays
+  if (phase && lastPhase && phase !== lastPhase && lesson?.id === lastPhaseLesson) now.classList.add("changed");
+  now.classList.toggle("live", working());
+  lastPhase = phase;
+  lastPhaseLesson = lesson?.id;
   $("#suggest").replaceChildren(
     ...(PHASES[phase] ? [now] : []),
     ...(SUGGEST[phase] ?? SUGGEST.none).map(([label, text]) => {
@@ -1189,6 +1207,7 @@ agentEvents.onmessage = async (e) => {
     for (const a of agents) if (!before.has(a.id)) connected(a);
     showWho();
     if (!$("#pop").hidden) renderPop();
+    if (!$("#start").hidden) renderStart();
   } else if (e.type === "call") {
     const to = lesson?.id === e.lesson ? lesson : { id: e.lesson, sections: 1, state: "" };
     agentLesson = e.lesson;
@@ -1212,7 +1231,7 @@ function connected(a) {
   const kind = kindOf(cmd);
   if (!cmd || (main && main.cwd === a.cwd && (kind ? main.kind === kind : main.cmd === cmd)) || settings.asked?.includes(kind ?? cmd)) return;
   const box = $("#offer");
-  box.replaceChildren(el("p", "", `${look.label} is live. Start it automatically whenever rlearn opens?`));
+  box.replaceChildren(el("p", "", `${look.label} is live. Start it automatically whenever rTutor opens?`));
   const row = el("div", "offer-row");
   const yes = el("button", "primary", "Start it automatically");
   const no = el("button", "", "Not now");
@@ -1238,6 +1257,7 @@ const working = () =>
 
 function setWorking() {
   const on = working();
+  $("#suggest .now")?.classList.toggle("live", on); // the gear tag shimmers while the tutor works
   const b = $("#composer .send");
   b.classList.toggle("stop", on);
   b.innerHTML = on ? '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>' : icon("send", 20);
@@ -1245,9 +1265,9 @@ function setWorking() {
   b.title = on ? "Stop" : "";
 }
 
-/** The agent's own terminal tab, when it runs in one of rlearn's. */
+/** The agent's own terminal tab, when it runs in one of rTutor's. */
 const agentTab = (a = agents.find((x) => x.id === activeAgent)) => a && tabs.find((t) => t.cwd === a.cwd);
-const NUDGE = "Call the rlearn next tool now and keep tutoring through rlearn's tools.";
+const NUDGE = "Call the rTutor next tool now and keep tutoring through rTutor's tools.";
 
 async function stop() {
   if (!lesson) return;
@@ -1274,15 +1294,12 @@ async function send(text) {
     return;
   }
   if (usingAgent()) {
-    if (!agents.length) {
-      note("No agent is running. Open the terminal and start one.");
-      openTerminal();
-      return;
-    }
     say(text, "user");
     sentWaiting = true;
     agentLesson = lesson.id;
-    thinking(true);
+    // no tutor yet: the message waits, and the choice of tutor is right here
+    if (!agents.length) chatNode(connectCard());
+    else thinking(true);
     await invoke("agent_send", { lesson: lesson.id, text }).catch((e) => { sentWaiting = false; thinking(false); note(String(e)); });
     // an agent that isn't waiting in `next` won't see the message until it is reminded
     setTimeout(() => {
@@ -1293,7 +1310,7 @@ async function send(text) {
         step(`Reminded ${agentLook(a.name).label} to pick this up`);
         invoke("term_write", { tab: tab.id, data: `${NUDGE}\r` }).catch(() => {});
       } else note(`${agentLook(a.name).label} isn't listening. In its terminal, tell it: ${NUDGE}`);
-      invoke("log_note", { line: `agent hadn't picked up the message after 3s; ${tab ? "reminded it in its terminal" : "its terminal isn't rlearn's"}` }).catch(() => {});
+      invoke("log_note", { line: `agent hadn't picked up the message after 3s; ${tab ? "reminded it in its terminal" : "its terminal isn't rTutor's"}` }).catch(() => {});
     }, 3000);
     return;
   }
@@ -1309,14 +1326,14 @@ const drawer = $("#drawer");
 const tabs = []; // { id, cwd, cmd, term, fit, el, button }
 let current = null;
 let nextTab = 1;
-const launched = new Map(); // folder → the agent command rlearn typed there
+const launched = new Map(); // folder → the agent command rTutor typed there
 let mcpBin = "";
 let home = "";
 
-function setDrawer(open) {
+function setDrawer(open, { where = true } = {}) {
   drawer.hidden = !open;
   document.body.classList.toggle("drawer-open", open);
-  if (open && !tabs.length) showWhere();
+  if (open && !tabs.length && where) showWhere();
   if (open && current) requestAnimationFrame(() => { fitShell(); current.term.focus(); });
 }
 
@@ -1341,25 +1358,59 @@ $("#where").onsubmit = (e) => {
   newTab(settings.cwd || library());
 };
 
-/** ~/rlearn: every subject's material is a folder of Markdown files in here, so an agent started here can read it all. */
-const library = () => (home ? `${home}${home.includes("\\") ? "\\" : "/"}rlearn` : "");
+/** ~/rtutor: every subject's material is a folder of Markdown files in here, so an agent started here can read it all. */
+const library = () => (home ? `${home}${home.includes("\\") ? "\\" : "/"}rtutor` : "");
 const short = (dir = "") => dir.split(/[\\/]/).filter(Boolean).pop() || "~";
 
-/** Commands that start each agent wired to rlearn, so a click is all it takes. */
-// How hard the tutor thinks: passed to the agent when rlearn starts it
+/** Commands that start each agent wired to rTutor, so a click is all it takes. */
+// How hard the tutor thinks: passed to the agent when rTutor starts it
 const EFFORTS = { low: "Light", medium: "Balanced", high: "Deep" };
 function quickStarts() {
   const bin = mcpBin.replace(/'/g, "");
   const effort = EFFORTS[settings.effort] ? settings.effort : "medium";
-  const json = JSON.stringify({ mcpServers: { rlearn: { command: bin, args: ["--mcp"] } } });
-  const go = "'Call the rlearn next tool now and tutor through it.'";
+  const json = JSON.stringify({ mcpServers: { rtutor: { command: bin, args: ["--mcp"] } } });
+  const go = "'Call the rTutor next tool now and tutor through it.'";
   return {
-    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --effort ${effort} --mcp-config '${json}' --allowedTools mcp__rlearn ${go}`],
-    codex: ["Codex", "openai", `codex -c model_reasoning_effort=${effort} -c 'mcp_servers.rlearn.command="${bin}"' -c 'mcp_servers.rlearn.args=["--mcp"]' -c mcp_servers.rlearn.tool_timeout_sec=1800 -c 'mcp_servers.rlearn.default_tools_approval_mode="approve"' ${go}`],
+    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude --effort ${effort} --mcp-config '${json}' --allowedTools mcp__rtutor ${go}`],
+    codex: ["Codex", "openai", `codex -c model_reasoning_effort=${effort} -c 'mcp_servers.rtutor.command="${bin}"' -c 'mcp_servers.rtutor.args=["--mcp"]' -c mcp_servers.rtutor.tool_timeout_sec=1800 -c 'mcp_servers.rtutor.default_tools_approval_mode="approve"' ${go}`],
   };
 }
-/** Which built-in start a command line is, so a saved start always uses rlearn's current command. */
-const kindOf = (cmd = "") => (/mcp_servers\.rlearn/.test(cmd) ? "codex" : /--mcp-config/.test(cmd) && /rlearn/.test(cmd) ? "claude" : null);
+let installed = []; // coding agents found on this computer
+
+/** One click: a terminal in the library folder with the agent already starting in it. */
+async function startAgent(kind) {
+  $("#pop").hidden = true;
+  setDrawer(true, { where: false });
+  await newTab(settings.cwd || library(), quickStarts()[kind][2]);
+}
+
+/** "Choose your tutor": the agents this computer has, started with one click, or an API key. */
+function connectCard() {
+  const box = el("div", "connect");
+  box.append(el("p", "", "Choose your tutor"));
+  const row = el("div", "connect-row");
+  for (const [kind, [label, mark]] of Object.entries(quickStarts())) {
+    const b = el("button", "connect-opt");
+    b.type = "button";
+    b.innerHTML = logo(mark, 22);
+    const found = installed.includes(kind);
+    b.append(el("span", "", label), el("small", "", found ? "Uses your subscription" : "Not found on this computer"));
+    b.classList.toggle("missing", !found);
+    b.onclick = () => startAgent(kind);
+    row.append(b);
+  }
+  const api = el("button", "connect-opt");
+  api.type = "button";
+  api.innerHTML = icon("spark", 22);
+  api.append(el("span", "", "API key"), el("small", "", "NVIDIA, OpenAI, Anthropic…"));
+  api.onclick = () => openModel();
+  row.append(api);
+  box.append(row);
+  return box;
+}
+
+/** Which built-in start a command line is, so a saved start always uses rTutor's current command. */
+const kindOf = (cmd = "") => (/mcp_servers\.(rtutor|rlearn)/.test(cmd) ? "codex" : /--mcp-config/.test(cmd) && /rtutor|rlearn/.test(cmd) ? "claude" : null);
 /** The command that starts the main agent: rebuilt for the built-in agents, as typed for any other. */
 const mainCommand = (m) => (m.kind && quickStarts()[m.kind] ? quickStarts()[m.kind][2] : m.cmd);
 
@@ -1391,8 +1442,8 @@ async function newTab(cwd, run) {
   }
   const any = el("button", "link", "Other agent");
   any.type = "button";
-  any.title = "Any agent that speaks MCP can power rlearn: add this server to it.";
-  any.onclick = () => term.write(`\r\n\x1b[2mAdd this MCP server to your agent, then ask it to start rlearn:\x1b[0m\r\n  ${mcpBin} --mcp\r\n`);
+  any.title = "Any agent that speaks MCP can power rTutor: add this server to it.";
+  any.onclick = () => term.write(`\r\n\x1b[2mAdd this MCP server to your agent, then ask it to start rTutor:\x1b[0m\r\n  ${mcpBin} --mcp\r\n`);
   hint.append(any);
   const screen = el("div", "screen");
   box.append(hint, screen);
@@ -1600,16 +1651,25 @@ async function renderPop() {
     });
     if (settings.main?.cwd === a.cwd && settings.main?.name === a.name) {
       const auto = el("span", "auto", "Auto");
-      auto.title = "Starts with rlearn. Click to stop that.";
+      auto.title = "Starts with rTutor. Click to stop that.";
       auto.onclick = (e) => { e.stopPropagation(); settings.main = null; saveSettings(); renderPop(); };
       b.append(auto);
     }
     parts.push(b);
   }
+  for (const [kind, [label, mark]] of Object.entries(quickStarts())) {
+    if (agents.some((a) => agentLook(a.name).logo === mark)) continue;
+    const b = el("button", "opt-row");
+    b.innerHTML = logo(mark, 22);
+    b.append(el("span", "name muted", `Start ${label}`));
+    b.title = installed.includes(kind) ? "Starts it in rTutor's terminal" : "Not found on this computer; install it first";
+    b.onclick = () => startAgent(kind);
+    parts.push(b);
+  }
   const term = el("button", "opt-row");
-  term.innerHTML = icon("plus", 20);
-  term.append(el("span", "name muted", "New agent"));
-  term.title = "Start a coding agent in the terminal";
+  term.innerHTML = icon("terminal", 20);
+  term.append(el("span", "name muted", "Other agent…"));
+  term.title = "Open a terminal to start any coding agent";
   term.onclick = () => { pop.hidden = true; openTerminal(); };
   const effort = el("div", "effort");
   effort.title = "How hard the tutor thinks. Takes effect the next time an agent starts.";
@@ -1730,7 +1790,10 @@ $("#start-form").onsubmit = async (e) => {
   const text = $("#start-input").value.trim();
   const material = materialsFor(target).length + pending.length > 0;
   if (!text && !material) return $("#start-input").focus();
-  if (usingAgent() ? !agents.length : !(await ready())) return usingAgent() ? openTerminal() : openModel();
+  if (usingAgent() ? !agents.length : !(await ready())) {
+    if (!usingAgent()) return openModel();
+    // no tutor yet: start the lesson anyway; the message waits and goes out once one connects
+  }
   const g = GEARS[gear] ?? GEARS.probe;
   const first = `${text || "Teach me this material."}\n\n${g.tell}`;
   const title = text.split("\n")[0].slice(0, 200) || pending[0]?.name.replace(/\.\w+$/, "") || "New lesson";
@@ -1770,7 +1833,8 @@ settings = { ...settings, ...((await invoke("get_settings")) ?? {}) };
 if (!["agent", "api"].includes(settings.active)) settings.active = "agent"; // older settings named a provider here
 if (!PRESETS[settings.api]) settings.api = "nvidia";
 await invoke("agent_listen", { onEvent: agentEvents }).catch(() => {});
-({ bin: mcpBin, home } = await invoke("mcp_command").catch(() => ({ bin: "rlearn", home: "" })));
+({ bin: mcpBin, home } = await invoke("mcp_command").catch(() => ({ bin: "rtutor", home: "" })));
+installed = await invoke("installed_agents").catch(() => []);
 showWho();
 setCollapsed(store.get("learn.collapsed", false));
 await refresh();

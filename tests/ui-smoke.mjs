@@ -20,7 +20,7 @@ async function agentFlow(browser, engine) {
         switch (command) {
           case "get_settings": return { active: "agent", providers: {} };
           case "agent_listen": window.__agent = args.onEvent; return;
-          case "mcp_command": return { bin: "/opt/rlearn", home: "/home/learner" };
+          case "mcp_command": return { bin: "/opt/rtutor", home: "/home/learner" };
           case "tree": return { lessons: state.lessons, folders: state.folders, sources: [] };
           case "create_folder": state.folders.push({ id: 1, parent: null, name: args.name }); return 1;
           case "create_lesson": state.lessons.push({ id: 1, title: args.title, folder: args.folder, state: "", sections: [], messages: [], toolResults: {} }); return 1;
@@ -29,7 +29,8 @@ async function agentFlow(browser, engine) {
           case "rename_lesson": lesson.title = args.title; return;
           case "agent_send": state.sent.push(args.text); return;
           case "agent_stop": state.stopped = true; return;
-          case "log_listen": return ["/tmp/rlearn.log", ["12:00:00.000Z agent connected"]];
+          case "installed_agents": return ["codex"];
+          case "log_listen": return ["/tmp/rtutor.log", ["12:00:00.000Z agent connected"]];
           case "material_search": return "material 1, part 2: voltage is push per charge";
           case "agent_result": state.results[args.id] = args.result; return;
           case "save_settings": case "agent_use": return;
@@ -41,7 +42,11 @@ async function agentFlow(browser, engine) {
   await page.goto("http://localhost:1421");
   const emit = (e) => page.evaluate((e) => { window.__agent.onmessage(e); }, e); // a quiz call settles only once answered
   await page.locator("#who").getByText("No agent", { exact: true }).waitFor();
-  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: false }], active: 7 });
+  // with no tutor yet, choosing one is right on the start screen
+  await page.locator(".connect").getByText("Choose your tutor").waitFor();
+  assert.equal(await page.locator(".connect-opt.missing").count(), 1, "the agent that isn't installed says so");
+  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rtutor", cmd: "", busy: false }], active: 7 });
+  await page.locator(".connect").waitFor({ state: "detached" });
   await page.locator("#who").getByText("Claude Code").waitFor();
   assert.ok(await page.locator("#who-logo svg[fill='#D97757']").count(), "the Claude logo marks the agent");
   const long = "Teach me circuits, from Ohm's law up to how a real power supply keeps its voltage steady";
@@ -55,7 +60,7 @@ async function agentFlow(browser, engine) {
   assert.equal(await page.locator("#composer .send").getAttribute("aria-label"), "Stop", "send turns into stop while the tutor works");
   const [first] = await page.evaluate(() => window.__state.sent);
   assert.ok(first.startsWith(long) && /test me/i.test(first), "the starting gear goes to the tutor");
-  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rlearn", cmd: "", busy: true }], active: 7 });
+  await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rtutor", cmd: "", busy: true }], active: 7 });
   await emit({ type: "call", id: 1, agent: 7, lesson: 1, name: "phase", input: { phase: "probe" } });
   await page.locator("#suggest").getByText("Start teaching").waitFor();
   assert.equal(await page.locator("#suggest .now").innerText(), "Probing");
@@ -139,7 +144,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
             case "save_settings": return;
             case "has_api_key": return true;
             case "agent_listen": window.__agent = args.onEvent; return;
-            case "mcp_command": return { bin: "/opt/rlearn", home: "/home/learner" };
+            case "mcp_command": return { bin: "/opt/rtutor", home: "/home/learner" };
             case "test_provider":
               if (args.provider.id === "openai") throw "Invalid API key";
               return "Connected. Lesson tool calling works.";

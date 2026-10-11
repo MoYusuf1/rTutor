@@ -13,6 +13,6 @@ const result = spawnSync(binary, [...args, "--mcp"], {
 assert.ifError(result.error);
 assert.equal(result.status, 0, result.stderr);
 const replies = result.stdout.trim().split("\n").map((line) => JSON.parse(line));
-assert.equal(replies[0].result.serverInfo.name, "rlearn");
+assert.equal(replies[0].result.serverInfo.name, "rtutor");
 assert.deepEqual(replies[1].result.tools.map((tool) => tool.name), ["next", "write_lesson", "quiz", "true_false", "short_answer", "update_state", "ask", "search_material", "read_material", "subject_notes", "phase", "say"]);
 console.log("Built app MCP startup and tool discovery passed"); // tool calls need the running app (bridge.rs)

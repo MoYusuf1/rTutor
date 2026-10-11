@@ -1,6 +1,6 @@
 //! A plain diagnostic log, one line per fact (like riptv's `--logs`): agents connecting, messages queued and
 //! delivered, every tool call with its time, API turns, errors. It's always on, kept small, and lives at
-//! <data dir>/rlearn.log so a person, or an agent, can read why a lesson stalled. The app shows it live.
+//! <data dir>/rtutor.log so a person, or an agent, can read why a lesson stalled. The app shows it live.
 //! Lesson content is never written here: only what happened, not what was said.
 
 use std::io::Write;
@@ -8,16 +8,16 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tauri::ipc::Channel;
 
-const MAX: u64 = 2 * 1024 * 1024; // past this the log starts over (the previous one is kept as rlearn.log.old)
+const MAX: u64 = 2 * 1024 * 1024; // past this the log starts over (the previous one is kept as rtutor.log.old)
 
 static FILE: OnceLock<PathBuf> = OnceLock::new();
 static PAGE: Mutex<Option<Channel<String>>> = Mutex::new(None);
 
 pub fn path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("rlearn.log")
+    data_dir.join("rtutor.log")
 }
 
-/// Where lines go; set once at startup (the app) or on first use (`rlearn --mcp`).
+/// Where lines go; set once at startup (the app) or on first use (`rtutor --mcp`).
 pub fn init(data_dir: &std::path::Path) {
     let _ = FILE.set(path(data_dir));
 }

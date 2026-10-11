@@ -63,7 +63,10 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     if version >= 2 {
         c.execute_batch(SCHEMA)?; // idempotent: adds tables introduced since (e.g. turns)
         add_lesson_columns(c)?;
-        return if version < 3 { subjects(c) } else { Ok(()) };
+        if version < 3 {
+            subjects(c)?;
+        }
+        return if version < 4 { slim(c) } else { Ok(()) };
     }
     // version 1 kept each lesson as one JSON blob; carry those lessons over
     let v1 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('lessons') WHERE name = 'data'", [], |r| r.get::<_, i64>(0))? > 0;
@@ -94,8 +97,19 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     tx.pragma_update(None, "user_version", 2)?;
     tx.commit()?;
     add_lesson_columns(c)?;
-    subjects(c)
+    subjects(c)?;
+    slim(c)
 }
+
+/// Version 4: material is kept once, as its parts; the copy in `sources.body` goes, and the space it
+/// took is given back.
+fn slim(c: &Connection) -> rusqlite::Result<()> {
+    c.execute_batch("UPDATE sources SET body = '' WHERE EXISTS (SELECT 1 FROM parts WHERE source_id = sources.id); PRAGMA user_version = 4;")?;
+    c.execute_batch("VACUUM;")
+}
+
+/// A source's whole text: its parts in order (older rows may still hold it in `body`).
+pub const SOURCE_TEXT: &str = "COALESCE(NULLIF(s.body, ''), (SELECT group_concat(body, char(10) || char(10) ORDER BY seq) FROM parts WHERE source_id = s.id), '')";
 
 /// Version 3: every lesson belongs to a subject (a top-level folder), and material is split into parts.
 fn subjects(c: &Connection) -> rusqlite::Result<()> {
@@ -242,14 +256,7 @@ pub fn next_seq(c: &Connection, lesson: i64) -> Res<usize> {
 
 /// The material the tutor teaches from: the lesson's own sources plus those of every folder above it.
 pub fn sources_for(c: &Connection, lesson: i64) -> Res<Vec<(String, String)>> {
-    let mut q = c
-        .prepare_cached(
-            "WITH RECURSIVE up(id) AS (
-               SELECT folder_id FROM lessons WHERE id = ?1
-               UNION ALL SELECT f.parent_id FROM folders f JOIN up ON f.id = up.id WHERE f.parent_id IS NOT NULL)
-             SELECT name, body FROM sources WHERE lesson_id = ?1 OR folder_id IN (SELECT id FROM up) ORDER BY id",
-        )
-        .map_err(err)?;
+    let mut q = c.prepare_cached(&format!("{MATERIAL} SELECT s.name, {SOURCE_TEXT} FROM mine s ORDER BY s.id")).map_err(err)?;
     let out = q.query_map([lesson], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err);
     out
 }
@@ -478,6 +485,7 @@ mod tests {
         assert!(read_part(&c, 1, 1, 1).unwrap().unwrap().2.contains("how are you"));
         assert!(read_part(&c, 1, 2, 1).unwrap().is_none(), "another subject's material is out of reach");
         assert_eq!(material_index(&c, 1).unwrap()[0].4, ["p. 4 · Greetings"]);
+        assert!(sources_for(&c, 1).unwrap()[0].1.contains("how are you"), "the text comes back from its parts");
         c.execute("DELETE FROM sources WHERE id = 1", []).unwrap();
         assert!(search_parts(&c, 1, "warran").unwrap().is_empty());
     }

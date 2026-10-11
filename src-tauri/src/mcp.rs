@@ -1,4 +1,4 @@
-//! `rlearn --mcp`: the MCP server (JSON-RPC over stdio) a coding agent starts to power rlearn.
+//! `rtutor --mcp`: the MCP server (JSON-RPC over stdio) a coding agent starts to power rTutor.
 //! It forwards every tool call to the running app over the localhost bridge (see bridge.rs).
 
 use serde_json::{json, Value};
@@ -6,18 +6,18 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-pub const INSTRUCTIONS: &str = "rlearn is a tutoring app that is already open on this computer, and you are its tutor. Don't \
+pub const INSTRUCTIONS: &str = "rTutor is a tutoring app that is already open on this computer, and you are its tutor. Don't \
 look for it or launch it, and don't run commands for it: you reach it only through these MCP tools. Call `next` right away and \
-follow what it returns. After every step, call `next` again to wait for the learner. Teach only through rlearn's tools; the \
+follow what it returns. After every step, call `next` again to wait for the learner. Teach only through rTutor's tools; the \
 learner reads the app, not this terminal.";
 
 fn tools() -> Vec<Value> {
     let mut tools = crate::llm::tools();
     tools.insert(0, json!({ "name": "next",
-        "description": "Wait for the learner's next message in rlearn (already open) and return it. Call it first, before anything else, and again whenever you have finished responding. The first call also returns how to teach.",
+        "description": "Wait for the learner's next message in rTutor (already open) and return it. Call it first, before anything else, and again whenever you have finished responding. The first call also returns how to teach.",
         "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } }));
     tools.push(json!({ "name": "say",
-        "description": "Show a short chat message to the learner in rlearn's chat pane. Use it for conversation, never for lesson content.",
+        "description": "Show a short chat message to the learner in rTutor's chat pane. Use it for conversation, never for lesson content.",
         "input_schema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }));
     tools
 }
@@ -37,7 +37,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
         "initialize" => json!({
             "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "rlearn", "version": env!("CARGO_PKG_VERSION") },
+            "serverInfo": { "name": "rtutor", "version": env!("CARGO_PKG_VERSION") },
             "instructions": INSTRUCTIONS,
         }),
         "ping" => json!({}),
@@ -53,7 +53,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
 }
 
 /// Where the running app's data directory is, the way Tauri resolves it.
-fn data_dir() -> std::path::PathBuf {
+pub fn data_dir() -> std::path::PathBuf {
     let home = || std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default());
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(Into::into).unwrap_or_else(|| home().join("AppData/Roaming"))
@@ -62,7 +62,7 @@ fn data_dir() -> std::path::PathBuf {
     } else {
         std::env::var_os("XDG_DATA_HOME").map(Into::into).unwrap_or_else(|| home().join(".local/share"))
     };
-    base.join("app.rlearn.desktop")
+    base.join("app.rtutor.desktop")
 }
 
 fn connect() -> Option<(TcpStream, String)> {
@@ -71,7 +71,7 @@ fn connect() -> Option<(TcpStream, String)> {
     Some((stream, info["token"].as_str()?.to_owned()))
 }
 
-/// The command line of the agent that started us (Linux only), so rlearn can offer to start it next time.
+/// The command line of the agent that started us (Linux only), so rTutor can offer to start it next time.
 fn parent_cmd() -> String {
     #[cfg(target_os = "linux")]
     {
@@ -115,7 +115,7 @@ fn presence(name: String, agent: Arc<Mutex<Option<u64>>>) {
 type Calls = Arc<Mutex<std::collections::HashMap<String, TcpStream>>>;
 
 fn forward(agent: Option<u64>, tool: &str, input: &Value, id: &Value, calls: &Calls) -> (String, bool) {
-    const CLOSED: &str = "rlearn isn't open. Ask the learner to open it, then call next again.";
+    const CLOSED: &str = "rTutor isn't open. Ask the learner to open it, then call next again.";
     let Some(agent) = agent else { return (CLOSED.into(), true) };
     let Some((mut stream, token)) = connect() else { return (CLOSED.into(), true) };
     if writeln!(stream, "{}", json!({ "token": token, "agent": agent, "tool": tool, "input": input })).is_err() {

@@ -1,6 +1,6 @@
 //! The learner's material (textbooks, slides, transcripts, notes): turned into clean Markdown, split into
 //! parts a tutor can search and read one at a time, and kept as a plain file in the subject's folder
-//! (~/rlearn/<subject>/) so a terminal agent can open it too.
+//! (~/rtutor/<subject>/) so a terminal agent can open it too.
 
 use crate::db::{err, Res};
 use std::path::{Path, PathBuf};
@@ -103,13 +103,13 @@ fn clean(name: &str) -> String {
     if s.is_empty() { "Untitled".into() } else { s }
 }
 
-/// ~/rlearn/<subject>: where a subject's material lives as files.
+/// ~/rtutor/<subject>: where a subject's material lives as files.
 pub fn subject_dir(subject: &str) -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
-    PathBuf::from(home).join("rlearn").join(clean(subject))
+    PathBuf::from(home).join("rtutor").join(clean(subject))
 }
 
-/// ~/rlearn/<subject>/sources: the material itself.
+/// ~/rtutor/<subject>/sources: the material itself.
 pub fn sources_dir(subject: &str) -> PathBuf {
     subject_dir(subject).join("sources")
 }
@@ -156,7 +156,7 @@ pub fn rename_subject(old: &str, new: &str) {
     }
 }
 
-/// Removes material files rlearn wrote, and their folder once it's empty. Other files are left alone.
+/// Removes material files rTutor wrote, and their folder once it's empty. Other files are left alone.
 pub fn remove_files(files: &[String]) {
     for f in files.iter().filter(|f| !f.is_empty()) {
         let path = Path::new(f);

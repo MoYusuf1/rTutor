@@ -323,7 +323,7 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
         betas.push("server-side-fallback-2026-07-01");
     }
     if compacts(&p.model) {
-        // past 150k input tokens the API summarizes older turns itself; rlearn just keeps appending
+        // past 150k input tokens the API summarizes older turns itself; rTutor just keeps appending
         body["context_management"] = json!({ "edits": [{ "type": "compact_20260112", "instructions": COMPACTION }] });
         betas.push("compact-2026-01-12");
     }

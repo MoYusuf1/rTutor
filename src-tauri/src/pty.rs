@@ -45,7 +45,7 @@ fn take_text(pending: &mut Vec<u8>) -> String {
 }
 
 /// Starts a shell for tab `tab` in `cwd` if it isn't running yet; its output streams to `out`.
-/// `run` is typed into the new shell, e.g. the agent rlearn starts on launch.
+/// `run` is typed into the new shell, e.g. the agent rTutor starts on launch.
 #[tauri::command]
 pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, cols: u16, rows: u16, out: Channel<String>) -> Result<(), String> {
     let term = app.state::<Term>();
@@ -61,7 +61,7 @@ pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, col
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
     if !cwd.is_empty() {
-        let _ = std::fs::create_dir_all(&cwd); // e.g. ~/rlearn on first use
+        let _ = std::fs::create_dir_all(&cwd); // e.g. ~/rtutor on first use
     }
     if std::path::Path::new(&cwd).is_dir() {
         cmd.cwd(cwd);
@@ -141,6 +141,20 @@ pub fn term_close(app: AppHandle, tab: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Which coding agents are installed, so the app can offer them by name. Looks on PATH and in the usual
+/// per-user install folders (a desktop launcher's PATH often leaves those out).
+#[tauri::command]
+pub fn installed_agents() -> Vec<&'static str> {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default());
+    let mut dirs: Vec<_> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    for extra in [".local/bin", ".npm-global/bin", ".bun/bin", ".claude/local", ".cargo/bin", "AppData/Roaming/npm"] {
+        dirs.push(home.join(extra));
+    }
+    dirs.extend(["/usr/local/bin", "/opt/homebrew/bin"].map(std::path::PathBuf::from));
+    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
+    ["claude", "codex"].into_iter().filter(|bin| dirs.iter().any(|d| exts.iter().any(|e| d.join(format!("{bin}{e}")).is_file()))).collect()
+}
+
 /// Picks the folder a new terminal opens in.
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle) -> Option<String> {
@@ -148,7 +162,7 @@ pub async fn pick_folder(app: AppHandle) -> Option<String> {
     app.dialog().file().blocking_pick_folder()?.into_path().ok().map(|p| p.display().to_string())
 }
 
-/// What an agent needs to start rlearn's tool server (this executable), and where terminals open by default.
+/// What an agent needs to start rTutor's tool server (this executable), and where terminals open by default.
 #[tauri::command]
 pub fn mcp_command() -> Result<serde_json::Value, String> {
     let bin = std::env::current_exe().map_err(err)?.display().to_string();
@@ -182,7 +196,7 @@ mod tests {
                     reply.lock().unwrap().write_all(b"\x1b[1;1R").unwrap();
                     answered = true;
                 }
-                if !reported && out.contains("rlearn-42") {
+                if !reported && out.contains("rtutor-42") {
                     let _ = tx.send(());
                     reported = true;
                 }
@@ -195,9 +209,9 @@ mod tests {
         let mut child = pair.slave.spawn_command(CommandBuilder::new(shell)).unwrap();
         drop(pair.slave);
         #[cfg(windows)]
-        writer.lock().unwrap().write_all(b"set /a rlearn_result=40+2\r\necho rlearn-%rlearn_result%\r\nexit\r\n").unwrap();
+        writer.lock().unwrap().write_all(b"set /a rtutor_result=40+2\r\necho rtutor-%rtutor_result%\r\nexit\r\n").unwrap();
         #[cfg(not(windows))]
-        writer.lock().unwrap().write_all(b"echo rlearn-$((40 + 2))\nexit\n").unwrap();
+        writer.lock().unwrap().write_all(b"echo rtutor-$((40 + 2))\nexit\n").unwrap();
         let result = rx.recv_timeout(std::time::Duration::from_secs(20));
         let _ = child.kill();
         drop(writer);

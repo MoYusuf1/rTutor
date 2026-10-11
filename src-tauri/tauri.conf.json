@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "rlearn",
-  "version": "0.1.2",
-  "identifier": "app.rlearn.desktop",
+  "productName": "rTutor",
+  "version": "0.2.0",
+  "identifier": "app.rtutor.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "rlearn",
+        "title": "rTutor",
         "width": 1440,
         "height": 900,
         "minWidth": 960,

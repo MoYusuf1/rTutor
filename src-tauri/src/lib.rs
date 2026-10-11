@@ -42,7 +42,7 @@ impl Open {
     }
 }
 
-const HANDOFF: &str = "[rlearn: you are taking over this lesson from a different tutor model. Read your lesson state and the recent \
+const HANDOFF: &str = "[rTutor: you are taking over this lesson from a different tutor model. Read your lesson state and the recent \
 turns, then continue exactly where it left off. Do not restart the probe or the plan.]";
 
 /// Where the history sent to non-Anthropic providers starts. It only moves forward, in steps, so the
@@ -82,13 +82,20 @@ impl Store {
 // ---------- API keys: in the OS keyring, never in the database ----------
 
 fn key_entry(provider: &str) -> Res<keyring::Entry> {
-    keyring::Entry::new("rlearn", provider).map_err(err)
+    keyring::Entry::new("rtutor", provider).map_err(err)
 }
 
 fn read_key(provider: &str) -> Res<String> {
     match key_entry(provider)?.get_password() {
         Ok(k) => Ok(k),
-        Err(keyring::Error::NoEntry) => Ok(String::new()),
+        // keys saved when the app was called rlearn: move them over on first use
+        Err(keyring::Error::NoEntry) => match keyring::Entry::new("rlearn", provider).and_then(|e| e.get_password()) {
+            Ok(k) => {
+                let _ = key_entry(provider)?.set_password(&k);
+                Ok(k)
+            }
+            Err(_) => Ok(String::new()),
+        },
         Err(e) => Err(format!("Couldn't read the API key from the system keyring: {e}")),
     }
 }
@@ -124,9 +131,9 @@ fn provider_key(provider: &llm::Provider) -> Res<String> {
 async fn test_provider(store: State<'_, Store>, provider: llm::Provider) -> Res<String> {
     let key = provider_key(&provider)?;
     let channel = Channel::new(|_| Ok(()));
-    let messages = [json!({ "role": "user", "content": "Connection check: call write_lesson once with markdown exactly RLEARN_CONNECTED, then end your turn." })];
+    let messages = [json!({ "role": "user", "content": "Connection check: call write_lesson once with markdown exactly RTUTOR_CONNECTED, then end your turn." })];
     let reply = llm::chat(&store.http, &provider, &key, "Follow the connection check exactly. Do not ask questions.", &messages, &channel).await?;
-    if !reply.content.iter().any(|b| b["name"] == "write_lesson" && b["input"]["markdown"].as_str().is_some_and(|s| s.trim() == "RLEARN_CONNECTED")) {
+    if !reply.content.iter().any(|b| b["name"] == "write_lesson" && b["input"]["markdown"].as_str().is_some_and(|s| s.trim() == "RTUTOR_CONNECTED")) {
         return Err("The provider responded, but did not call the lesson tool. Check that this model supports tool calling.".into());
     }
     Ok(format!("Connected to {}. Lesson tool calling works.", if reply.usage.model.is_empty() { &provider.model } else { &reply.usage.model }))
@@ -282,7 +289,7 @@ async fn send(
         if o.system.is_none() {
             o.system = Some(system_prompt(&c, lesson)?.into());
         }
-        // Anthropic summarizes long histories on its servers. For the others rlearn cuts old turns and puts the
+        // Anthropic summarizes long histories on its servers. For the others rTutor cuts old turns and puts the
         // tutor's own lesson state in their place, which the database still has in full.
         let mut k = db::compaction(&c, lesson)?;
         if provider.kind != "anthropic" {
@@ -539,7 +546,8 @@ fn add_source(store: State<Store>, folder: Option<i64>, lesson: Option<i64>, nam
     }
     let words = text.split_whitespace().count() as i64;
     let tx = c.unchecked_transaction().map_err(err)?;
-    exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![folder, lesson, name, text, words, file])?;
+    // the text is kept once, as searchable parts (plus the Markdown file); `body` stays empty
+    exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, '', ?4, ?5)", params![folder, lesson, name, words, file])?;
     let id = tx.last_insert_rowid();
     db::add_parts(&tx, id, &text).map_err(err)?;
     tx.commit().map_err(err)?;
@@ -551,7 +559,7 @@ fn add_source(store: State<Store>, folder: Option<i64>, lesson: Option<i64>, nam
 fn get_source(store: State<Store>, id: i64) -> Res<Value> {
     store
         .db()?
-        .query_row("SELECT name, body, file FROM sources WHERE id = ?1", [id], |r| {
+        .query_row(&format!("SELECT s.name, {}, s.file FROM sources s WHERE s.id = ?1", db::SOURCE_TEXT), [id], |r| {
             Ok(json!({ "name": r.get::<_, String>(0)?, "body": r.get::<_, String>(1)?, "file": r.get::<_, String>(2)? }))
         })
         .map_err(err)
@@ -618,7 +626,32 @@ fn save_settings(store: State<Store>, settings: Value) -> Res<()> {
     exec(&*store.db()?, "INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?1)", [settings.to_string()]).map(drop)
 }
 
-/// Material files written before sources had their own folder move into ~/rlearn/<subject>/sources/.
+/// The app used to be called rlearn: its database, log and ~/rlearn library move over once.
+fn renamed(dir: &std::path::Path) {
+    let Some(old) = dir.parent().map(|p| p.join("app.rlearn.desktop")) else { return };
+    if old.join("rlearn.db").is_file() && !dir.join("rtutor.db").exists() {
+        for (from, to) in [("rlearn.db", "rtutor.db"), ("rlearn.db-wal", "rtutor.db-wal"), ("rlearn.db-shm", "rtutor.db-shm"), ("rlearn.log", "rtutor.log")] {
+            let _ = std::fs::rename(old.join(from), dir.join(to));
+        }
+    }
+    let (from, to) = (material::subject_dir("x").parent().map(|p| p.with_file_name("rlearn")), material::subject_dir("x").parent().map(|p| p.to_owned()));
+    if let (Some(from), Some(to)) = (from, to) {
+        if from.is_dir() && !to.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+}
+
+/// The library folder after the rename: file paths saved under ~/rlearn point into ~/rtutor.
+fn renamed_paths(c: &Connection) {
+    if let Some(lib) = material::subject_dir("x").parent() {
+        let (from, to) = (lib.with_file_name("rlearn").display().to_string(), lib.display().to_string());
+        let _ = c.execute("UPDATE sources SET file = ?2 || substr(file, length(?1) + 1) WHERE file LIKE ?1 || '/%'", params![from, to]);
+        let _ = c.execute("UPDATE settings SET value = replace(value, ?1 || '/', ?2 || '/') WHERE key = 'app'", params![from, to]);
+    }
+}
+
+/// Material files written before sources had their own folder move into ~/rtutor/<subject>/sources/.
 fn relocate_sources(c: &Connection) {
     let files: Vec<(i64, String)> = c
         .prepare("SELECT id, file FROM sources WHERE file != ''")
@@ -633,22 +666,21 @@ fn relocate_sources(c: &Connection) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // one window: opening rTutor again (from the launcher, or an agent) brings the open one forward
+    if bridge::focus_running(&mcp::data_dir()) {
+        return;
+    }
     tauri::Builder::default()
-        // one window: opening rlearn again (from the launcher, or an agent) brings it forward instead
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(w) = app.webview_windows().into_values().next() {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::Term::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            renamed(&dir);
             log::init(&dir);
-            log::note(format!("rlearn {} started", env!("CARGO_PKG_VERSION")));
-            let c = db::open(&dir.join("rlearn.db"))?;
+            log::note(format!("rTutor {} started", env!("CARGO_PKG_VERSION")));
+            let c = db::open(&dir.join("rtutor.db"))?;
+            renamed_paths(&c);
             relocate_sources(&c);
             app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
@@ -658,11 +690,11 @@ pub fn run() {
             send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
-            pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command,
+            pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command, pty::installed_agents,
             stop_turn, set_subject_notes, log::log_listen, log::log_note, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
         .run(tauri::generate_context!())
-        .expect("error while running rlearn");
+        .expect("error while running rTutor");
 }
 
 #[cfg(test)]

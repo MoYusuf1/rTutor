@@ -1,21 +1,14 @@
-Polished chat typography, softer message bubbles and a rounded teal composer, with the original warm light/dark palette.
+rTutor's first preview: a personal tutor that probes what you know, plans, teaches one idea at a time and checks it landed, powered by Claude Code, Codex or an API key, and taught from your own textbooks and notes.
 
 Downloads:
-- Apple Silicon Macs: `aarch64.dmg`.
-- Intel Macs: `x64.dmg`.
-- Windows x64: `x64-setup.exe` or `x64_en-US.msi`.
-- Linux x86_64, including Arch: `amd64.AppImage`. Make it executable before launching. If FUSE is unavailable, use `APPIMAGE_EXTRACT_AND_RUN=1 ./rlearn_0.1.2_amd64.AppImage`.
-- Debian-based Linux: `amd64.deb`.
-- `SHA256SUMS` verifies all installers.
+- Apple Silicon Macs: `aarch64.dmg`. Intel Macs: `x64.dmg`.
+- Windows: `x64-setup.exe` (or the `.msi`).
+- Linux, including Arch: `amd64.AppImage`. Make it executable (`chmod +x`) and open it. Without FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+- Debian and Ubuntu: `amd64.deb`.
+- `SHA256SUMS` lets you check the downloads.
 
-Release checks: Chromium and WebKit Playwright flows on both Mac architectures, Windows and Linux; light/dark layouts at 960px and 1440px; correct/incorrect/unknown quiz answers; free answers; provider connection success/error states; quiz/state reopening; native Rust tests and builds; built tool-server startup; AppImage tool-server smoke test on current Arch Linux.
+Opening it the first time: the Mac build isn't notarized, so right-click the app and choose Open (or allow it in System Settings → Privacy & Security). The Windows installer isn't signed, so choose More info → Run anyway.
 
-Playwright uses controlled IPC replies. It does not validate native webview rendering, installation prompts or live provider sign-in on every OS. Local Claude Code and Codex integrations were previously live-tested on Linux. Use Model → Test connection after installing on your machine.
+To be tutored by Claude Code or Codex, install it and sign in once; rTutor then starts it with one click. Or use an API key.
 
-macOS uses ad-hoc signing, without Apple notarization. Windows installers are unsigned. Your OS may require approval in its security settings. No paid signing certificate is configured.
-
-macOS and Windows now use native secure credential stores; the terminal chooses the platform shell. CLI discovery includes common user and Homebrew installation paths. Install and sign in to your chosen CLI separately. API providers require your own model ID and key.
-
-This is a private desktop preview, downloadable by repository collaborators. It is not a hosted website.
-
-Windows terminal lifecycle now services ConPTY teardown while draining output. The native PTY regression test answers cursor-position queries like the app’s xterm terminal and has bounded execution.
+Checked before release: the UI tests (Chromium and WebKit) and the Rust tests on both kinds of Mac, Windows and Linux; installers built on each; the AppImage's tool server started on current Arch Linux.
