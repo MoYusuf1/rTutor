@@ -115,7 +115,9 @@ async function agentFlow(browser, engine) {
   await page.locator("#input").press("Enter");
   await page.waitForFunction(() => window.__state.results[2]);
   const typed = await page.evaluate(() => window.__state.results[2]);
-  assert.ok(typed.content.includes("What is voltage?") && !typed.is_error, "typing answers the open quiz");
+  assert.ok(typed.content.includes("What is voltage?") && /skipped/.test(typed.content) && !typed.is_error, "a chat message sets the open question aside");
+  await page.locator(".msg.user").getByText("What is voltage?").waitFor();
+  await page.locator(".card.answered .given").getByText("Skipped").waitFor();
   await page.locator(".work:not(.done)").waitFor();
   await emit({ type: "call", id: 3, agent: 7, lesson: 1, name: "say", input: { text: "Good question, see the canvas." } });
   await page.locator(".msg.bot").getByText("Good question, see the canvas.").waitFor();

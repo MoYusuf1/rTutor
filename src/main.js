@@ -914,27 +914,26 @@ function choiceCard(kind, question, options, { note: withNote = false, free = fa
     extra.onkeydown = (e) => { if (free && e.key === "Enter" && extra.value.trim()) done({ i: -1 }); };
     card.scrollIntoView({ block: "nearest" });
     const self = {
-      answer: (text) => { extra.value = text; done({ i: -1, typed: true }); },
+      // the chat box is for talking, not answering: a message sent there sets this question aside
+      interrupt: (said) => done({ i: -1, interrupted: said }),
       abandon: () => done({ abandoned: true }),
     };
     openCard = self;
-    $("#input").placeholder = options.length ? "Or answer in your own words…" : "Type your answer…";
     thinking(false);
     function done(r) {
       if (openCard !== self) return;
       openCard = null;
-      $("#input").placeholder = "Ask your tutor…";
       for (const b of buttons) b.disabled = true;
       const text = extra.value.trim();
       // an answered card settles: the typing box and Check go, what was given stays as plain text
       card.classList.add("answered");
       if (r.i !== undefined && r.i >= 0) buttons[r.i].classList.add("picked");
-      const given = !options.length ? text : r.i >= 0 && text ? `Your note: ${text}` : "";
+      const given = r.interrupted ? "" : !options.length ? text : r.i >= 0 && text ? `Your note: ${text}` : "";
       row.remove();
       extra.remove();
       if (given && !r.abandoned) card.append(el("div", "given", given));
-      if (r.abandoned) card.append(el("div", "given muted", "Left unanswered"));
-      resolve({ ...r, buttons, text });
+      if (r.abandoned || r.interrupted) card.append(el("div", "given muted", r.interrupted ? "Skipped" : "Left unanswered"));
+      resolve({ ...r, buttons, text: r.interrupted ?? text });
     }
   });
 }
@@ -1042,11 +1041,17 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
   if (["quiz", "ask", "true_false", "short_answer"].includes(name)) {
     if (!here) return { ...bad(LEFT), abandoned: true };
   }
+  // a message typed in the chat box while a question was open: the learner set the question aside
+  const aside = (r) => {
+    say(r.text, "user");
+    return ok(`The learner skipped this question and wrote in the chat instead: "${r.text}". Respond to that first; it may change what you do next. Don't repeat the skipped question unless it still fits.`);
+  };
   if (name === "true_false") {
     const { statement, answer, explanation = "" } = input;
     if (typeof statement !== "string" || typeof answer !== "boolean") return bad("true_false needs a statement and a boolean answer.");
     const r = await choiceCard("quiz", statement, ["True", "False", "I don't know"], { note: true });
     if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    if (r.interrupted) return aside(r);
     if (r.i < 0) {
       say(r.text, "user");
       return ok(`The learner didn't pick True or False. They wrote: ${r.text}`);
@@ -1064,6 +1069,7 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     if (typeof question !== "string" || typeof answer !== "string") return bad("short_answer needs a question and a model answer.");
     const r = await choiceCard("quiz short", question, [], { free: true });
     if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    if (r.interrupted) return aside(r);
     const lines = [`[!question] ${question.replace(/\s*\n\s*/g, " ")}`, `**Your answer:** ${r.text}`, `**A good answer:** ${answer}`];
     if (explanation) lines.push("", explanation);
     await addSection(quoted(lines.join("\n")));
@@ -1076,6 +1082,7 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     }
     const r = await choiceCard("quiz", question, [...options, "I don't know"], { note: true });
     if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    if (r.interrupted) return aside(r);
     if (r.i < 0) {
       say(r.text, "user");
       return ok(`The learner didn't pick an option. They wrote: ${r.text}`);
@@ -1091,6 +1098,7 @@ async function executeTool({ id, name, input = {} }, t = turn, to = lesson) {
     if (typeof input.question !== "string" || !Array.isArray(input.options)) return bad("ask needs a question and options.");
     const r = await choiceCard("ask", input.question, input.options, { free: true });
     if (r.abandoned) return { ...bad(LEFT), abandoned: true };
+    if (r.interrupted) return aside(r);
     const answer = r.i < 0 ? r.text : input.options[r.i];
     say(answer, "user");
     return ok(`The learner answered: ${answer}`);
@@ -1346,7 +1354,7 @@ async function stop() {
 async function send(text) {
   if (!lesson) return;
   if (openCard) {
-    openCard.answer(text);
+    openCard.interrupt(text); // the question's tool call returns with this message; no separate send
     return;
   }
   if (usingAgent()) {
