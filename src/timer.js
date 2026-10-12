@@ -108,13 +108,26 @@ export function renderPomo(full = false) {
     n.spellcheck = false;
     n.inputMode = "numeric";
     n.title = title;
-    n.onfocus = () => getSelection().selectAllChildren(n);
+    // the first digit typed replaces the number (engines disagree on whether a click selects it)
+    let fresh = false;
+    n.onfocus = () => { fresh = true; };
     n.onkeydown = (e) => {
       if (e.key === "Enter" || e.key === "Escape") {
         e.preventDefault();
         if (e.key === "Escape") n.textContent = shown;
         n.blur();
-      } else if (e.key.length === 1 && !/\d/.test(e.key)) e.preventDefault(); // digits only
+      } else if (e.key.length === 1) {
+        e.preventDefault(); // digits only, typed by hand so every engine behaves the same
+        if (!/\d/.test(e.key) || (!fresh && n.textContent.length >= 3)) return;
+        n.textContent = fresh ? e.key : n.textContent + e.key;
+        fresh = false;
+        getSelection().selectAllChildren(n);
+        getSelection().collapseToEnd();
+      } else if (e.key === "Backspace") {
+        e.preventDefault();
+        n.textContent = fresh ? "" : n.textContent.slice(0, -1);
+        fresh = false;
+      }
     };
     n.onblur = () => {
       const v = Math.round(Number(n.textContent.trim()));
