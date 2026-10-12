@@ -1710,11 +1710,12 @@ function renderPomo(full = false) {
   b.style.setProperty("--p", started ? 1 - left / pomoLength() : 0);
   const pop = $("#pomo-pop");
   if (pop.hidden) return;
-  if (!full && pop.querySelector("button.big")) {
-    pop.querySelector("button.big").textContent = clock(left);
+  if (!full && pop.contains(document.activeElement)) return; // don't redraw under someone typing
+  if (!full && running && pop.querySelector(".big")) {
+    pop.querySelector(".big").textContent = clock(left);
     return;
   }
-  if (!full && pop.querySelector(".big.edit")) return; // don't redraw under someone typing
+  if (!full) return;
   const set = pomoSet();
   const tabs = el("div", "pomo-tabs");
   for (const [mode, label] of Object.entries(POMO_LABEL)) {
@@ -1737,48 +1738,43 @@ function renderPomo(full = false) {
     settings.pomo = { ...set, ...patch };
     saveSettings();
   };
-  // the clock is the setting: click it (when it isn't running) and type the minutes
-  const big = el("button", "big", clock(left));
-  big.type = "button";
-  big.title = running ? "" : "Click to change the length";
-  big.disabled = running;
-  big.onclick = () => {
-    const input = Object.assign(el("input", "big-edit"), { type: "number", min: 1, max: 180, value: set[pomo.mode] });
-    const wrap = el("div", "big edit");
-    wrap.append(input, el("span", "unit", "min"));
-    big.replaceWith(wrap);
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = (keep) => {
-      if (done) return;
-      done = true;
-      const v = Math.round(Number(input.value));
-      if (keep && v >= 1 && v <= 180) {
-        save({ [pomo.mode]: v });
-        pomo = { ...pomo, left: null, ends: 0 };
-        savePomo();
-      }
-      renderPomo(true);
+  /** A number that edits in place: it looks like plain text until you type over it. Enter or leaving saves. */
+  const editable = (value, min, max, onSave, title, pad = 0) => {
+    const shown = String(value).padStart(pad, "0");
+    const n = el("span", "num-edit", shown);
+    n.contentEditable = "true";
+    n.spellcheck = false;
+    n.inputMode = "numeric";
+    n.title = title;
+    n.onfocus = () => getSelection().selectAllChildren(n);
+    n.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        if (e.key === "Escape") n.textContent = shown;
+        n.blur();
+      } else if (e.key.length === 1 && !/\d/.test(e.key)) e.preventDefault(); // digits only
     };
-    input.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
-    input.onblur = () => finish(true);
+    n.onblur = () => {
+      const v = Math.round(Number(n.textContent.trim()));
+      if (v >= min && v <= max && v !== value) onSave(v);
+      else n.textContent = shown;
+    };
+    return n;
   };
-  // sessions in this round: done ones filled, the current one ringed; − and + set how many before the long break
-  const round = el("div", "pomo-round");
-  const done = (pomo.count - 1) % set.every;
-  const dots = el("div", "dots-row");
-  for (let k = 0; k < set.every; k++) dots.append(el("span", k < done ? "done" : k === done && pomo.mode === "focus" ? "now" : ""));
-  const step = (d, label) => {
-    const b = el("button", "icon step", d < 0 ? "−" : "+");
-    b.type = "button";
-    b.title = label;
-    b.disabled = d < 0 ? set.every <= 1 : set.every >= 12;
-    b.onclick = () => { save({ every: set.every + d }); renderPomo(true); };
-    return b;
-  };
-  round.append(step(-1, "Fewer sessions before the long break"), dots, step(1, "More sessions before the long break"));
-  round.title = `${set.every} sessions, then a long break`;
+  // the clock: while it isn't running, its minutes are the setting for this tab
+  const big = el("div", "big");
+  if (running || left !== pomoLength()) big.textContent = clock(left);
+  else {
+    big.append(editable(set[pomo.mode], 1, 180, (v) => {
+      save({ [pomo.mode]: v });
+      pomo = { ...pomo, left: null, ends: 0 };
+      savePomo();
+      renderPomo(true);
+    }, "Type the minutes", 2), ":00");
+  }
+  // sessions: which one this is, out of how many before the long break (that number is typed too)
+  const round = el("p", "pomo-round");
+  round.append(`Session ${((pomo.count - 1) % set.every) + 1} of `, editable(set.every, 1, 12, (v) => { save({ every: v }); renderPomo(true); }, "Sessions before the long break"));
   pop.replaceChildren(tabs, big, controls, round);
 }
 

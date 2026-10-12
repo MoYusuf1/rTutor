@@ -510,22 +510,14 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .pomo-tabs button { flex: 1; padding: 7px 4px; border-radius: 9px; color: var(--muted); font: 500 13.5px var(--ui); }
 .pomo-tabs button:hover { color: var(--text); }
 .pomo-tabs button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px #0000001a; }
-#pomo-pop .big { display: block; width: 100%; margin: 14px 0 12px; padding: 4px 0; border-radius: 14px; font: 600 64px/1 var(--ui); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--text); }
-#pomo-pop button.big:not(:disabled):hover { background: var(--hover); cursor: text; }
-#pomo-pop button.big:disabled { opacity: 1; }
-#pomo-pop .big.edit { display: flex; align-items: baseline; justify-content: center; gap: 8px; }
-.big-edit { width: 2.6ch; padding: 0; border: 0; border-bottom: 2px solid var(--accent); background: none; color: var(--text); font: inherit; text-align: center; outline: 0; -moz-appearance: textfield; }
-.big-edit::-webkit-inner-spin-button, .big-edit::-webkit-outer-spin-button { -webkit-appearance: none; }
-#pomo-pop .big.edit .unit { font-size: 18px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
-.pomo-round { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 16px; }
-.dots-row { display: flex; gap: 7px; }
-.dots-row span { width: 10px; height: 10px; border-radius: 50%; background: var(--hover); }
-.dots-row .done { background: var(--accent); }
-.dots-row .now { box-shadow: inset 0 0 0 2px var(--accent); }
-.pomo-round .step { width: 28px; height: 28px; border-radius: 8px; font-size: 16px; color: var(--muted); }
+#pomo-pop .big { display: block; width: 100%; margin: 14px 0 12px; padding: 4px 0; font: 600 64px/1 var(--ui); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--text); }
 .pomo-controls { display: flex; justify-content: center; align-items: center; gap: 8px; }
 .pomo-controls .go { min-width: 150px; padding: 11px 20px; border-radius: 12px; font-size: 15px; letter-spacing: 0.02em; }
-#pomo-pop .big { height: 76px; }
-#pomo-pop .big.edit { align-items: center; }
-.big-edit { height: 64px; border-bottom-width: 3px; }
-.big-edit::selection { background: var(--accent-soft); color: var(--accent); }
+
+/* numbers you can type over in place: no box, just a soft highlight on hover and a jade caret */
+.num-edit { border-radius: 8px; outline: 0; caret-color: var(--accent); cursor: text; transition: background 0.15s; }
+.num-edit:hover { background: var(--hover); }
+.num-edit:focus { background: var(--accent-soft); color: var(--accent); }
+.num-edit::selection { background: transparent; }
+.pomo-round { margin: 14px 0 2px; font-size: 13.5px; color: var(--muted); }
+.pomo-round .num-edit { padding: 1px 6px; font-weight: 600; color: var(--text); }

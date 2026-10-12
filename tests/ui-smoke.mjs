@@ -45,18 +45,18 @@ async function subjectFlow(browser, engine) {
   await page.locator("#pomo.paused").waitFor();
   await page.locator("#pomo-pop .pomo-tabs").getByText("Short break").click();
   await page.locator("#pomo-pop .big").getByText("05:00").waitFor();
-  // lengths are edited right on the clock
+  // the minutes and the session count are typed over in place
   await page.locator("#pomo-pop .pomo-tabs").getByText("Pomodoro", { exact: true }).click();
-  await page.locator("#pomo-pop button.big").click();
-  await page.locator("#pomo-pop .big-edit").fill("50");
-  await page.locator("#pomo-pop .big-edit").press("Enter");
+  await page.locator("#pomo-pop .big .num-edit").click();
+  await page.keyboard.type("50");
+  await page.keyboard.press("Enter");
   await page.waitForFunction(() => window.__saved?.pomo?.focus === 50);
-  await page.locator("#pomo-pop .big").getByText("50:00").waitFor();
-  // sessions before the long break
-  assert.equal(await page.locator("#pomo-pop .dots-row span").count(), 4);
-  await page.locator("#pomo-pop .step").getByText("+").click();
+  await page.locator("#pomo-pop .big").getByText("50").waitFor();
+  await page.locator("#pomo-pop .pomo-round .num-edit").click();
+  await page.keyboard.type("5");
+  await page.keyboard.press("Enter");
   await page.waitForFunction(() => window.__saved?.pomo?.every === 5);
-  assert.equal(await page.locator("#pomo-pop .dots-row span").count(), 5);
+  await page.locator("#pomo-pop .pomo-round").getByText(/^Session 1 of/).waitFor();
   assert.deepEqual(errors, []);
   await page.close();
   console.log(`${engine} UI passed: an agent per subject, started in its folder`);
