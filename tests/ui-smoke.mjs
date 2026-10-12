@@ -96,6 +96,11 @@ async function agentFlow(browser, engine) {
   await page.locator('#where-model option[value="gpt-test"]').waitFor({ state: "attached" });
   assert.equal(await page.locator("#where-model option").first().innerText(), "Default (GPT-Test)");
   assert.deepEqual(await page.locator("#where-effort option").allInnerTexts(), ["Default (low)", "low", "high"], "effort levels come from the model");
+  // any model the agent accepts can be typed in, so new models need no update
+  await page.locator("#where-model").selectOption("__other");
+  await page.locator("#where .model-name").fill("gpt-new-9");
+  await page.locator("#where .model-name").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#where-model")?.value === "gpt-new-9");
   await page.locator("#drawer-close").click();
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rtutor", cmd: "", busy: false }], active: 7 });
   await page.locator("#who").getByText("Claude Code").waitFor();

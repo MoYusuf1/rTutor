@@ -186,7 +186,13 @@ pub async fn agent_models(kind: String) -> serde_json::Value {
                 .or_else(|_| std::process::Command::new(home().join(".local/bin/claude")).arg("--help").output())
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                 .unwrap_or_default();
-            let (levels, aliases) = claude_options(&help);
+            let (levels, mut aliases) = claude_options(&help);
+            // the help text only gives examples; add every model family Claude Code has used or offered on this computer
+            for family in claude_families(&home()) {
+                if !aliases.contains(&family) {
+                    aliases.push(family);
+                }
+            }
             let models: Vec<Value> = aliases.iter().map(|a| json!({ "id": a, "name": a[..1].to_uppercase() + &a[1..], "levels": levels, "default": "" })).collect();
             json!({ "models": models, "current": null, "effort": null, "levels": levels })
         }
@@ -194,6 +200,28 @@ pub async fn agent_models(kind: String) -> serde_json::Value {
     })
     .await
     .unwrap_or_default()
+}
+
+/// Model families ("haiku", "sonnet", ...) Claude Code has used here or offers this account, read from its own
+/// files: usage stats, the extra models it lists, and the configured model. Each family name is an alias Claude
+/// Code resolves to that family's newest model, so new versions need nothing from rTutor.
+fn claude_families(home: &std::path::Path) -> Vec<String> {
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_default();
+    let stats = read(home.join(".claude/stats-cache.json"));
+    let config = read(home.join(".claude.json"));
+    let settings = read(home.join(".claude/settings.json"));
+    let mut ids: Vec<String> = stats["modelUsage"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    ids.extend(config["additionalModelOptionsCache"].as_array().into_iter().flatten().filter_map(|m| m["value"].as_str().map(str::to_owned)));
+    ids.extend(settings["model"].as_str().map(str::to_owned));
+    let mut out = Vec::new();
+    for id in ids {
+        // claude-haiku-4-5-20251001 → haiku; a bare alias stays as it is
+        let family = id.strip_prefix("claude-").unwrap_or(&id).split(['-', '[']).next().unwrap_or_default().to_lowercase();
+        if !family.is_empty() && family.chars().all(|c| c.is_ascii_alphabetic()) && !out.contains(&family) {
+            out.push(family);
+        }
+    }
+    out
 }
 
 /// The effort levels and model aliases in `claude --help`.
@@ -278,6 +306,12 @@ mod tests {
         let (levels, models) = super::claude_options(help);
         assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(models, ["fable", "opus", "sonnet"]);
+        // families Claude Code has used here come from its own files
+        let home = std::env::temp_dir().join(format!("rtutor-claude-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/stats-cache.json"), r#"{"modelUsage":{"claude-haiku-4-5-20251001":{},"claude-sonnet-5":{},"claude-3-opus":{}}}"#).unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"additionalModelOptionsCache":[{"value":"claude-fable-5-1[1m]"}]}"#).unwrap();
+        assert_eq!(super::claude_families(&home), ["haiku", "sonnet", "fable"]);
     }
 
     #[test]

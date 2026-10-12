@@ -501,3 +501,4 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .pomo.paused #pomo-time::after { content: " · paused"; color: var(--muted); font-size: 12.5px; }
 .pomo.break, .pomo.long { color: var(--ok); }
 .pomo.break .ring, .pomo.long .ring { background: linear-gradient(90deg, var(--ok) calc(var(--p, 0) * 100%), transparent 0); }
+.model-name { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--accent); border-radius: 10px; background: var(--bg); color: var(--text); font: 13.5px var(--ui); outline: 0; }

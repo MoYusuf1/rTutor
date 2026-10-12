@@ -1448,15 +1448,15 @@ function quickStarts() {
   const bin = mcpBin.replace(/'/g, "");
   // model and effort as picked when starting it; blank means the agent's own default
   const pick = (kind) => settings.agentPrefs?.[kind] ?? {};
-  const safe = (v) => (v && /^[\w.:-]+$/.test(v) ? v : "");
+  const safe = (v) => (v && /^[\w.:\[\]-]+$/.test(v) ? v : ""); // model names and aliases only; quoted below
   const cm = safe(pick("claude").model), ce = safe(pick("claude").effort);
   const xm = safe(pick("codex").model), xe = safe(pick("codex").effort);
   const json = JSON.stringify({ mcpServers: { rtutor: { command: bin, args: ["--mcp"] } } });
   const go = "'Call the rTutor next tool now and tutor through it.'";
   return {
     // the prompt goes first: --mcp-config and --allowedTools take every word after them
-    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude ${go}${cm ? ` --model ${cm}` : ""}${ce ? ` --effort ${ce}` : ""} --mcp-config '${json}' --allowedTools mcp__rtutor`],
-    codex: ["Codex", "openai", `codex${xm ? ` -m ${xm}` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c 'mcp_servers.rtutor.command="${bin}"' -c 'mcp_servers.rtutor.args=["--mcp"]' -c mcp_servers.rtutor.tool_timeout_sec=1800 -c 'mcp_servers.rtutor.default_tools_approval_mode="approve"' ${go}`],
+    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude ${go}${cm ? ` --model '${cm}'` : ""}${ce ? ` --effort ${ce}` : ""} --mcp-config '${json}' --allowedTools mcp__rtutor`],
+    codex: ["Codex", "openai", `codex${xm ? ` -m '${xm}'` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c 'mcp_servers.rtutor.command="${bin}"' -c 'mcp_servers.rtutor.args=["--mcp"]' -c mcp_servers.rtutor.tool_timeout_sec=1800 -c 'mcp_servers.rtutor.default_tools_approval_mode="approve"' ${go}`],
   };
 }
 let installed = []; // coding agents found on this computer
@@ -1486,8 +1486,10 @@ async function fillModels(kind, model = $("#where-model"), effortSel = $("#where
   const prefs = (settings.agentPrefs ??= {})[kind] ??= {};
   const opt = (value, text) => Object.assign(el("option", "", text), { value });
   const current = info.models.find((m) => m.id === info.current);
-  model.replaceChildren(opt("", current ? `Default (${current.name})` : "Default"), ...info.models.map((m) => opt(m.id, m.name)));
-  model.value = info.models.some((m) => m.id === prefs.model) ? prefs.model : "";
+  // the agent's own models, one typed in earlier, and "Other…" for any name the agent accepts (new models included)
+  const custom = prefs.model && !info.models.some((m) => m.id === prefs.model) ? [opt(prefs.model, prefs.model)] : [];
+  model.replaceChildren(opt("", current ? `Default (${current.name})` : "Default"), ...info.models.map((m) => opt(m.id, m.name)), ...custom, opt("__other", "Other…"));
+  model.value = prefs.model ?? "";
   const levels = () => {
     const m = info.models.find((x) => x.id === (model.value || info.current)) ?? info.models[0];
     const list = m?.levels?.length ? m.levels : info.levels ?? [];
@@ -1498,7 +1500,34 @@ async function fillModels(kind, model = $("#where-model"), effortSel = $("#where
     prefs.effort = effort.value;
   };
   levels();
-  model.onchange = () => { prefs.model = model.value; levels(); saveSettings(); changed(); };
+  model.onchange = () => {
+    if (model.value === "__other") {
+      // type a model name in place of the menu; Enter keeps it, Escape goes back
+      const typed = el("input", "model-name");
+      typed.placeholder = kind === "claude" ? "e.g. haiku or claude-haiku-5-5" : "model name";
+      typed.onclick = (e) => e.stopPropagation();
+      model.replaceWith(typed);
+      typed.focus();
+      let finished = false;
+      const finish = (keep) => {
+        if (finished) return;
+        finished = true;
+        const v = typed.value.trim();
+        typed.replaceWith(model);
+        const ok = keep && /^[\w.:\[\]-]+$/.test(v);
+        if (ok) prefs.model = v;
+        fillModels(kind, model, effortSel, changed);
+        if (ok) { saveSettings(); changed(); }
+      };
+      typed.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
+      typed.onblur = () => finish(true);
+      return;
+    }
+    prefs.model = model.value;
+    levels();
+    saveSettings();
+    changed();
+  };
   effortSel.onchange = () => { prefs.effort = effortSel.value; saveSettings(); changed(); };
 }
 
