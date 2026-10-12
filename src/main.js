@@ -1,127 +1,13 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2, ScrollText, Copy, Radar, Map as MapIcon, ListChecks, Timer, Play, Pause, RotateCcw } from "lucide";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
-import katex from "katex";
-import "katex/dist/katex.min.css";
-import mermaidUrl from "@mermaid-js/tiny/dist/mermaid.tiny.js?url";
 import "./style.css";
+import { $, el, store } from "./dom.js";
+import { icon, logo, agentLook } from "./icons.js";
+import { md, drawDiagrams, partialField } from "./markdown.js";
+import { startTimer } from "./timer.js";
 
-marked.use({ breaks: true });
-const $ = (s) => document.querySelector(s);
-const el = (tag, cls, text) => {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text != null) e.textContent = text;
-  return e;
-};
-const store = {
-  get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* UI prefs only */ } },
-};
+for (const e of document.querySelectorAll("[data-icon]")) e.innerHTML = icon(e.dataset.icon);
 
-// ---------- icons ----------
-
-// Lucide icons (ISC): drawn on a 24px grid with one stroke weight, so every icon matches.
-const ICONS = {
-  sidebar: PanelLeft, folder: Folder, folderOpen: FolderOpen, search: Search, edit: SquarePen, plus: Plus, doc: FileText,
-  chev: ChevronRight, clip: Paperclip, x: X, send: ArrowUp, spark: Sparkles, terminal: SquareTerminal, gear: Settings2,
-  sources: LibraryBig, lesson: BookOpenText, trash: Trash2, log: ScrollText, copy: Copy,
-  probe: Radar, plan: MapIcon, teach: BookOpenText, review: ListChecks, timer: Timer, play: Play, pause: Pause, reset: RotateCcw,
-};
-const icon = (name, size = 20) =>
-  !ICONS[name] ? "" : `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]
-    .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(" ")}/>`)
-    .join("")}</svg>`;
-for (const e of document.querySelectorAll("[data-icon]")) e.innerHTML = icon(e.dataset.icon, e.classList.contains("send") ? 20 : 20);
-
-// Provider logos (Simple Icons, CC0). Brand colors only where the mark is a color; the rest follow the text.
-const LOGOS = {
-  claude: ["#D97757", "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"],
-  anthropic: ["currentColor", "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"],
-  openai: ["currentColor", "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"],
-  nvidia: ["#76B900", "M8.948 8.798v-1.43a6.7 6.7 0 0 1 .424-.018c3.922-.124 6.493 3.374 6.493 3.374s-2.774 3.851-5.75 3.851c-.398 0-.787-.062-1.158-.185v-4.346c1.528.185 1.837.857 2.747 2.385l2.04-1.714s-1.492-1.952-4-1.952a6.016 6.016 0 0 0-.796.035m0-4.735v2.138l.424-.027c5.45-.185 9.01 4.47 9.01 4.47s-4.08 4.964-8.33 4.964c-.37 0-.733-.035-1.095-.097v1.325c.3.035.61.062.91.062 3.957 0 6.82-2.023 9.593-4.408.459.371 2.34 1.263 2.73 1.652-2.633 2.208-8.772 3.984-12.253 3.984-.335 0-.653-.018-.971-.053v1.864H24V4.063zm0 10.326v1.131c-3.657-.654-4.673-4.46-4.673-4.46s1.758-1.944 4.673-2.262v1.237H8.94c-1.528-.186-2.73 1.245-2.73 1.245s.68 2.412 2.739 3.11M2.456 10.9s2.164-3.197 6.5-3.533V6.201C4.153 6.59 0 10.653 0 10.653s2.35 6.802 8.948 7.42v-1.237c-4.84-.6-6.492-5.936-6.492-5.936z"],
-  openrouter: ["currentColor", "M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z"],
-};
-const logo = (name, size = 18) => {
-  const l = LOGOS[name];
-  return l ? `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="${l[0]}" aria-hidden="true"><path d="${l[1]}"/></svg>` : icon(name === "terminal" ? "terminal" : "spark", size);
-};
-/** An MCP client's name ("claude-code", "codex-mcp-client", ...) as people say it, with its logo. */
-function agentLook(name = "") {
-  if (/claude/i.test(name)) return { label: "Claude Code", logo: "claude" };
-  if (/codex/i.test(name)) return { label: "Codex", logo: "openai" };
-  return { label: name.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Agent", logo: "terminal" };
-}
-
-// ---------- markdown → sanitized HTML, with LaTeX, callouts and (when final) mermaid ----------
-
-const tex = (t, displayMode) => katex.renderToString(t, { displayMode, throwOnError: false });
-
-function md(src, final = true) {
-  const code = [];
-  const math = [];
-  // hide code so a $ inside it isn't math; render math before markdown so marked can't mangle it
-  src = String(src)
-    .replace(/```[\s\S]*?```|`[^`\n]*`/g, (c) => `KXC${code.push(c) - 1}KXC`)
-    .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => `KXM${math.push(tex(t, true)) - 1}KXM`)
-    .replace(/\$([^\s$](?:[^$\n]*[^\s$])?)\$/g, (_, t) => `KXM${math.push(tex(t, false)) - 1}KXM`)
-    .replace(/KXC(\d+)KXC/g, (_, i) => code[i]);
-  const node = el("div", "md");
-  node.innerHTML = DOMPurify.sanitize(marked.parse(src).replace(/KXM(\d+)KXM/g, (_, i) => math[i]));
-
-  for (const bq of node.querySelectorAll("blockquote")) {
-    const p = bq.firstElementChild;
-    const m = p?.tagName === "P" && p.innerHTML.match(/^\[!(\w+)\]\s*/);
-    if (!m) continue;
-    const rest = p.innerHTML.slice(m[0].length);
-    const cut = rest.search(/<br\s*\/?>|\n/);
-    const title = el("div", "callout-title");
-    title.innerHTML = cut < 0 ? rest : rest.slice(0, cut); // already sanitized above
-    if (!title.textContent.trim()) title.textContent = m[1];
-    p.innerHTML = cut < 0 ? "" : rest.slice(cut).replace(/^(<br\s*\/?>|\n)\s*/, "");
-    if (!p.textContent.trim()) p.remove();
-    const body = el("div", "callout-body");
-    body.append(...bq.childNodes);
-    const box = el("div", `callout callout-${m[1].toLowerCase()}`);
-    box.append(title, body);
-    bq.replaceWith(box);
-  }
-  if (final) {
-    for (const c of node.querySelectorAll("code.language-mermaid")) c.parentElement.replaceWith(el("div", "mermaid", c.textContent));
-  }
-  return node;
-}
-
-let mermaidLib;
-async function drawDiagrams(node) {
-  const nodes = node.querySelectorAll(".mermaid");
-  if (!nodes.length) return;
-  if (!mermaidLib) {
-    // the tiny build (no heavy layout engines) is a classic script that sets globalThis.mermaid; load it on first diagram
-    await new Promise((resolve, reject) => {
-      const script = Object.assign(document.createElement("script"), { src: mermaidUrl, onload: resolve, onerror: reject });
-      document.head.append(script);
-    });
-    mermaidLib = globalThis.mermaid;
-  }
-  {
-    // read the palette on every draw so diagrams follow a light/dark switch
-    const css = getComputedStyle(document.documentElement);
-    const v = (name) => css.getPropertyValue(name).trim();
-    mermaidLib.initialize({
-      startOnLoad: false,
-      theme: "base",
-      themeVariables: {
-        background: v("--bg"), primaryColor: v("--surface"), primaryTextColor: v("--text"), primaryBorderColor: v("--accent"),
-        secondaryColor: v("--sidebar"), tertiaryColor: v("--bg"), lineColor: v("--muted"), textColor: v("--text"),
-        fontFamily: "Geist Variable, sans-serif", fontSize: "14px",
-      },
-    });
-  }
-  await mermaidLib.run({ nodes }).catch(() => {}); // a broken diagram shows mermaid's own error
-}
 
 /** A node whose markdown re-renders at most once per frame while text streams in. */
 function liveMarkdown(parent) {
@@ -149,26 +35,6 @@ function liveMarkdown(parent) {
       drawDiagrams(box);
     },
   };
-}
-
-/** The value of a string field inside JSON that is still streaming in, e.g. {"markdown": "## Ti */
-function partialField(json, key) {
-  const m = json.match(new RegExp(`"${key}"\\s*:\\s*"`));
-  if (!m) return "";
-  let out = "";
-  for (let i = m.index + m[0].length; i < json.length; i++) {
-    const c = json[i];
-    if (c === '"') break;
-    if (c !== "\\") { out += c; continue; }
-    const n = json[++i];
-    if (n === undefined) break;
-    if (n === "u") {
-      if (i + 4 >= json.length) break;
-      out += String.fromCharCode(parseInt(json.slice(i + 1, i + 5), 16));
-      i += 4;
-    } else out += { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" }[n] ?? n;
-  }
-  return out;
 }
 
 function follow(node) {
@@ -824,7 +690,7 @@ async function streamTurn(content) {
 
   const ch = new Channel();
   ch.onmessage = (e) => {
-    if (e.type === "log" || mine !== gen) return;
+    if (mine !== gen) return;
     if (e.type === "start") {
       const b = e.block;
       const view = { buf: "" };
@@ -1159,8 +1025,7 @@ function seg(label, value, frac, title) {
 }
 
 async function meter() {
-  const p = provider();
-  const s = await invoke("stats", { lesson: lesson?.id ?? null, provider: p.id }).catch(() => ({}));
+  const s = await invoke("stats", { lesson: lesson?.id ?? null }).catch(() => ({}));
   const parts = [];
   const last = s.last;
   if (last) {
@@ -1642,161 +1507,6 @@ function openTerminal() {
   if (tabs.length) showWhere(); // a new terminal for another agent
 }
 
-// ---------- focus timer (pomodoro), like Pomofocus: focus, short break, long break, with saved lengths ----------
-
-const POMO_DEFAULTS = { focus: 25, short: 5, long: 15, every: 4, autoBreak: true, autoFocus: false };
-const POMO_LABEL = { focus: "Pomodoro", short: "Short break", long: "Long break" };
-const pomoSet = () => ({ ...POMO_DEFAULTS, ...(settings.pomo ?? {}) }); // lengths and switches, saved with the app's settings
-// the running clock lives in the window, so a restart doesn't lose a session in progress
-let pomo = store.get("learn.pomo2", { mode: "focus", ends: 0, left: null, count: 1 });
-
-const savePomo = () => store.set("learn.pomo2", pomo);
-const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const pomoLength = (mode = pomo.mode) => pomoSet()[mode] * 60;
-const pomoLeft = () => Math.max(0, pomo.ends ? (pomo.ends - Date.now()) / 1000 : pomo.left ?? pomoLength());
-
-function chime() {
-  try {
-    const a = new AudioContext();
-    for (const [i, f] of [660, 880].entries()) {
-      const o = a.createOscillator();
-      const g = a.createGain();
-      o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, a.currentTime + i * 0.18);
-      g.gain.exponentialRampToValueAtTime(0.15, a.currentTime + i * 0.18 + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + i * 0.18 + 0.5);
-      o.connect(g).connect(a.destination);
-      o.start(a.currentTime + i * 0.18);
-      o.stop(a.currentTime + i * 0.18 + 0.55);
-    }
-  } catch { /* no audio: the label still changes */ }
-}
-
-function pomoTo(mode, run = false) {
-  pomo = { ...pomo, mode, left: null, ends: run ? Date.now() + pomoLength(mode) * 1000 : 0 };
-  savePomo();
-  renderPomo(true);
-}
-function pomoToggle() {
-  if (pomo.ends) pomo = { ...pomo, left: pomoLeft(), ends: 0 }; // pause
-  else pomo = { ...pomo, ends: Date.now() + pomoLeft() * 1000, left: null }; // start or resume
-  savePomo();
-  renderPomo(true);
-}
-
-/** The button by Sources, and the panel when it's open. `full` redraws the panel too (not just its clock). */
-function renderPomo(full = false) {
-  const left = pomoLeft();
-  const running = pomo.ends > 0;
-  const started = running || pomo.left != null;
-  if (running && left <= 0) {
-    // a session ends: a chime, a note, and on to the next one
-    chime();
-    const set = pomoSet();
-    if (pomo.mode === "focus") {
-      const next = pomo.count % set.every === 0 ? "long" : "short";
-      pomo.count++;
-      if (lesson) note(next === "long" ? `${set.every} focus sessions done. Take ${set.long} minutes.` : `Focus session done. Take ${set.short}.`);
-      pomoTo(next, set.autoBreak);
-    } else {
-      if (lesson) note("Break's over. Time to focus.");
-      pomoTo("focus", set.autoFocus);
-    }
-    return;
-  }
-  const b = $("#pomo");
-  $("#pomo-time").textContent = started ? clock(left) : "Focus";
-  b.className = `pomo ${pomo.mode}${running ? " running" : started ? " paused" : ""}`;
-  b.style.setProperty("--p", started ? 1 - left / pomoLength() : 0);
-  const pop = $("#pomo-pop");
-  if (pop.hidden) return;
-  if (!full && pop.contains(document.activeElement)) return; // don't redraw under someone typing
-  if (!full && running && pop.querySelector(".big")) {
-    pop.querySelector(".big").textContent = clock(left);
-    return;
-  }
-  if (!full) return;
-  const set = pomoSet();
-  const tabs = el("div", "pomo-tabs");
-  for (const [mode, label] of Object.entries(POMO_LABEL)) {
-    const t = el("button", mode === pomo.mode ? "on" : "", label);
-    t.type = "button";
-    t.onclick = () => pomoTo(mode);
-    tabs.append(t);
-  }
-  const go = el("button", "primary go", running ? "Pause" : started ? "Resume" : "Start");
-  go.type = "button";
-  go.onclick = pomoToggle;
-  const reset = el("button", "icon");
-  reset.type = "button";
-  reset.title = "Restart this session";
-  reset.innerHTML = icon("reset", 18);
-  reset.onclick = () => pomoTo(pomo.mode);
-  const controls = el("div", "pomo-controls");
-  controls.append(go, reset);
-  const save = (patch) => {
-    settings.pomo = { ...set, ...patch };
-    saveSettings();
-  };
-  /** A number that edits in place: it looks like plain text until you type over it. Enter or leaving saves. */
-  const editable = (value, min, max, onSave, title, pad = 0) => {
-    const shown = String(value).padStart(pad, "0");
-    const n = el("span", "num-edit", shown);
-    n.contentEditable = "true";
-    n.spellcheck = false;
-    n.inputMode = "numeric";
-    n.title = title;
-    n.onfocus = () => getSelection().selectAllChildren(n);
-    n.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === "Escape") {
-        e.preventDefault();
-        if (e.key === "Escape") n.textContent = shown;
-        n.blur();
-      } else if (e.key.length === 1 && !/\d/.test(e.key)) e.preventDefault(); // digits only
-    };
-    n.onblur = () => {
-      const v = Math.round(Number(n.textContent.trim()));
-      if (v >= min && v <= max && v !== value) onSave(v);
-      else n.textContent = shown;
-    };
-    return n;
-  };
-  // the clock: while it isn't running, its minutes are the setting for this tab
-  const big = el("div", "big");
-  if (running || left !== pomoLength()) big.textContent = clock(left);
-  else {
-    big.append(editable(set[pomo.mode], 1, 180, (v) => {
-      save({ [pomo.mode]: v });
-      pomo = { ...pomo, left: null, ends: 0 };
-      savePomo();
-      renderPomo(true);
-    }, "Type the minutes", 2), ":00");
-  }
-  // rounds: which one this is, out of how many before the long break; − and + change how many
-  const round = el("div", "pomo-round");
-  const step = (d) => {
-    const b = el("button", "step", d < 0 ? "−" : "+");
-    b.type = "button";
-    b.title = d < 0 ? "One round fewer" : "One more round";
-    b.disabled = d < 0 ? set.every <= 1 : set.every >= 12;
-    b.onclick = () => { save({ every: set.every + d }); renderPomo(true); };
-    return b;
-  };
-  round.append(step(-1), el("span", "", `Round ${((pomo.count - 1) % set.every) + 1} of ${set.every}`), step(1));
-  pop.replaceChildren(tabs, big, controls, round);
-}
-
-$("#pomo").onclick = (e) => {
-  e.stopPropagation();
-  $("#pomo-pop").hidden = !$("#pomo-pop").hidden;
-  toggleSources(false);
-  renderPomo(true);
-};
-$("#pomo").oncontextmenu = (e) => { e.preventDefault(); pomoTo(pomo.mode); };
-// the path is taken when the click happens: a panel that redraws itself under the click still counts as inside
-const clickedIn = (e, ...ids) => e.composedPath().some((n) => ids.includes(n.id));
-addEventListener("click", (e) => { if (!clickedIn(e, "pomo-pop", "pomo")) $("#pomo-pop").hidden = true; });
-
 // ---------- the Log tab: what happened, one line per fact (agents, messages, tool calls, errors) ----------
 
 const logLines = $("#log-lines");
@@ -2126,8 +1836,13 @@ settings = { ...settings, ...((await invoke("get_settings")) ?? {}) };
 if (!["agent", "api"].includes(settings.active)) settings.active = "agent"; // older settings named a provider here
 if (!PRESETS[settings.api]) settings.api = "nvidia";
 await invoke("agent_listen", { onEvent: agentEvents }).catch(() => {});
-setInterval(renderPomo, 1000); // the timer reads its lengths from the settings just loaded
-renderPomo();
+// the timer reads its lengths from the settings just loaded
+startTimer({
+  get: () => settings.pomo,
+  set: (pomo) => { settings.pomo = pomo; saveSettings(); },
+  note: (text) => lesson && note(text),
+  opened: () => toggleSources(false),
+});
 ({ bin: mcpBin, home } = await invoke("mcp_command").catch(() => ({ bin: "rtutor", home: "" })));
 installed = await invoke("installed_agents").catch(() => []);
 showWho();

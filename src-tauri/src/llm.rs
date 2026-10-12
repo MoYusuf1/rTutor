@@ -25,12 +25,6 @@ pub enum Event {
     Start { index: usize, block: Value },
     Delta { index: usize, text: String },
     Stop { index: usize },
-    /// A line for the Agent panel: what the provider is doing behind the scenes.
-    Log { text: String },
-}
-
-pub(crate) fn log(ch: &Channel<Event>, text: impl Into<String>) {
-    let _ = ch.send(Event::Log { text: text.into() });
 }
 
 #[derive(Serialize, Default)]
@@ -52,8 +46,6 @@ pub struct Usage {
     pub cache_write: u64,
     pub output: u64,
     pub cost: Option<f64>,
-    pub subscription: bool,
-    pub limits: Value, // subscription windows (Claude Code: 5-hour and weekly), when the provider reports them
     pub ms: u64,
 }
 
@@ -330,9 +322,9 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
     if !betas.is_empty() {
         req = req.header("anthropic-beta", betas.join(","));
     }
-    log(ch, format!("POST {base}/v1/messages  model={}  messages={}", p.model, messages.len()));
+    crate::log::note(format!("POST {base}/v1/messages  model={}  messages={}", p.model, messages.len()));
     let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
-    log(ch, format!("HTTP {}", resp.status()));
+    crate::log::note(format!("HTTP {}", resp.status()));
 
     let streamed = sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
@@ -470,9 +462,9 @@ async fn openai(http: &reqwest::Client, p: &Provider, key: &str, system: &str, m
         let req = http.post(&url).json(body);
         if key.is_empty() { req } else { req.bearer_auth(key) }.send()
     };
-    log(ch, format!("POST {url}  model={}  messages={}", p.model, messages.len()));
+    crate::log::note(format!("POST {url}  model={}  messages={}", p.model, messages.len()));
     let mut resp = send(&body).await.map_err(|e| e.to_string())?;
-    log(ch, format!("HTTP {}", resp.status()));
+    crate::log::note(format!("HTTP {}", resp.status()));
     if resp.status() == reqwest::StatusCode::BAD_REQUEST {
         // some OpenAI-compatible servers reject the usage option; retry once without it
         let text = resp.text().await.unwrap_or_default();
@@ -581,5 +573,16 @@ mod tests {
         assert_eq!(kept, ["text", "fallback", "tool_use"]);
         let plain = vec![json!({ "type": "thinking" }), json!({ "type": "tool_use" })];
         assert_eq!(clean_fallback(plain.clone()), plain);
+    }
+}
+
+#[cfg(test)]
+mod tls {
+    /// Real HTTPS through the ring provider: TLS=1 cargo test --lib tls -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn https_works_with_ring() {
+        let r = crate::http_client().get("https://api.anthropic.com/v1/models").send().await.expect("TLS handshake and request");
+        assert!(r.status().as_u16() > 0);
     }
 }

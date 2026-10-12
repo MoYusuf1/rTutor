@@ -12,7 +12,9 @@ futures-util = "0.3.34"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 pdf-extract = "0.12.1"
 portable-pty = "0.9.0"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+# TLS crypto from ring: far smaller than the default aws-lc, and no C toolchain step
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

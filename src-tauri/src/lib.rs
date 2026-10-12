@@ -64,6 +64,13 @@ fn cut_point(messages: &[Value], lens: &[usize], from: usize) -> usize {
     (i..messages.len()).find(user).or_else(|| (from + 1..i).rev().find(user)).unwrap_or(from)
 }
 
+/// The HTTP client for API providers. reqwest is built without a TLS crypto provider (see Cargo.toml), so ring is
+/// installed first; building a client without one panics.
+fn http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
+}
+
 impl Store {
     fn db(&self) -> Res<std::sync::MutexGuard<'_, Connection>> {
         self.db.lock().map_err(err)
@@ -343,10 +350,6 @@ async fn send(
         "api   {} {} in + {} cached / {} out  {:.1}s  stop={}",
         u.model, u.input + u.cache_write, u.cache_read, u.output, u.ms as f64 / 1000.0, reply.stop_reason
     ));
-    llm::log(&on_event, format!(
-        "done  {}  {} in + {} cached / {} out  {:.1}s  stop={}",
-        u.model, u.input + u.cache_write, u.cache_read, u.output, u.ms as f64 / 1000.0, reply.stop_reason
-    ));
     drop(messages); // last other reference, so the push below appends in place
     if reply.stop_reason == "refusal" {
         reply.content.retain(|b| b["type"] != "tool_use"); // a refusal can cut a tool call off mid-input
@@ -354,10 +357,6 @@ async fn send(
     let msg = json!({ "role": "assistant", "content": reply.content });
     let c = store.db()?;
     db::record_turn(&c, lesson, &provider.id, &reply.usage)?;
-    if !reply.usage.limits.is_null() {
-        let key = format!("limits:{}", provider.id);
-        exec(&c, "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, reply.usage.limits.to_string()])?;
-    }
     let mut o = store.open.lock().map_err(err)?;
     if o.lesson == lesson {
         db::append_message(&c, lesson, o.messages.len(), &msg)?;
@@ -671,20 +670,13 @@ fn material_read(store: State<Store>, lesson: i64, material: i64, part: i64) -> 
     }
 }
 
-/// What the status strip shows: lesson totals, the latest turn, and the provider's last known limits.
+/// What the API usage line shows: lesson totals and the latest turn.
 #[tauri::command]
-fn stats(store: State<Store>, lesson: Option<i64>, provider: String) -> Res<Value> {
-    let c = store.db()?;
-    let mut out = match lesson {
-        Some(id) => db::lesson_stats(&c, id)?,
-        None => json!({}),
-    };
-    let limits: Option<String> = c
-        .query_row("SELECT value FROM settings WHERE key = ?1", [format!("limits:{provider}")], |r| r.get(0))
-        .optional()
-        .map_err(err)?;
-    out["limits"] = limits.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
-    Ok(out)
+fn stats(store: State<Store>, lesson: Option<i64>) -> Res<Value> {
+    match lesson {
+        Some(id) => db::lesson_stats(&*store.db()?, id),
+        None => Ok(json!({})),
+    }
 }
 
 // ---------- settings ----------
@@ -760,7 +752,7 @@ pub fn run() {
             for id in pending {
                 let _ = mirror_lesson(&c, id);
             }
-            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: reqwest::Client::new(), stops: Mutex::default() });
+            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: http_client(), stops: Mutex::default() });
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())
         })
