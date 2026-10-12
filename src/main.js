@@ -901,9 +901,9 @@ function choiceCard(kind, question, options, { note: withNote = false, free = fa
       extra.placeholder = !options.length ? "Type your answer" : free ? "Your own answer" : "Why? (optional)";
       card.append(extra);
     }
+    const row = el("div", "answer-row");
     if (!options.length) {
       // a short answer: the box is the whole card, with a button to hand it in
-      const row = el("div", "answer-row");
       const check = el("button", "primary", "Check");
       check.type = "button";
       check.onclick = () => extra.value.trim() && done({ i: -1 });
@@ -925,8 +925,16 @@ function choiceCard(kind, question, options, { note: withNote = false, free = fa
       openCard = null;
       $("#input").placeholder = "Ask your tutor…";
       for (const b of buttons) b.disabled = true;
-      extra.disabled = true;
-      resolve({ ...r, buttons, text: extra.value.trim() });
+      const text = extra.value.trim();
+      // an answered card settles: the typing box and Check go, what was given stays as plain text
+      card.classList.add("answered");
+      if (r.i !== undefined && r.i >= 0) buttons[r.i].classList.add("picked");
+      const given = !options.length ? text : r.i >= 0 && text ? `Your note: ${text}` : "";
+      row.remove();
+      extra.remove();
+      if (given && !r.abandoned) card.append(el("div", "given", given));
+      if (r.abandoned) card.append(el("div", "given muted", "Left unanswered"));
+      resolve({ ...r, buttons, text });
     }
   });
 }

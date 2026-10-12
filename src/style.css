@@ -300,7 +300,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 }
 
 .callout { --c: var(--accent); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); border-radius: 10px; overflow: hidden; margin: 1em 0; font-size: 0.92em; }
-.callout-success { --c: var(--ok); } .callout-failure { --c: var(--bad); } .callout-question, .callout-warning { --c: var(--quiz); }
+.callout-success { --c: var(--ok); } .callout-failure { --c: var(--bad); } .callout-question { --c: var(--accent); } .callout-warning { --c: var(--quiz); }
 .callout-title { padding: 8px 14px; font: 600 15px/1.45 var(--ui); color: var(--c); background: color-mix(in srgb, var(--c) 10%, transparent); }
 .callout-success .callout-title::before { content: "✓  "; } .callout-failure .callout-title::before { content: "✗  "; }
 .callout-body { padding: 6px 14px 10px; }
@@ -470,3 +470,11 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .where-opts label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-align: left; }
 .where-opts select { min-width: 170px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font: 14px var(--ui); }
 .sources-btn #sources-count:empty { display: none; }
+
+/* an answered question: settled, not waiting for input */
+.card.answered { background: transparent; }
+.card.answered .opt { cursor: default; }
+.card.answered .opt:not(.right):not(.wrong):not(.picked) { opacity: 0.4; }
+.card.answered .opt.picked:not(.right):not(.wrong) { border-color: var(--accent); background: var(--accent-soft); }
+.given { padding: 10px 14px; border-radius: 12px; background: var(--hover); font-size: 15px; overflow-wrap: anywhere; }
+.given.muted { background: none; padding: 0 2px; color: var(--muted); font-size: 13.5px; }

@@ -144,6 +144,10 @@ async function agentFlow(browser, engine) {
   const judged = (await page.evaluate(() => window.__state.results[21])).content;
   assert.ok(judged.includes('"moving charges"') && judged.includes("Judge it yourself"), judged);
   await page.locator("#canvas-body").getByText("A good answer:").waitFor();
+  // an answered question settles: no box or Check button left, the answer stays as text
+  assert.equal(await page.locator(".card.short input, .card.short button").count(), 0, "nothing left to check");
+  await page.locator(".card.short.answered .given").getByText("moving charges").waitFor();
+  assert.equal(await page.locator(".card.answered input").count(), 0, "no answered card keeps an input");
   // deleting asks first, in a dialog
   await page.locator("#tree .row.lesson").click({ button: "right" });
   await page.locator("#menu").getByText("Delete lesson").click();
