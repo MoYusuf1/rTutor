@@ -1,6 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2, ScrollText, Copy } from "lucide";
+import { PanelLeft, Folder, FolderOpen, Search, SquarePen, Plus, FileText, ChevronRight, Paperclip, X, ArrowUp, Sparkles, SquareTerminal, Settings2, LibraryBig, BookOpenText, Trash2, ScrollText, Copy, Radar, Map as MapIcon, ListChecks, Timer, Play, Pause, RotateCcw } from "lucide";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
@@ -28,9 +28,10 @@ const ICONS = {
   sidebar: PanelLeft, folder: Folder, folderOpen: FolderOpen, search: Search, edit: SquarePen, plus: Plus, doc: FileText,
   chev: ChevronRight, clip: Paperclip, x: X, send: ArrowUp, spark: Sparkles, terminal: SquareTerminal, gear: Settings2,
   sources: LibraryBig, lesson: BookOpenText, trash: Trash2, log: ScrollText, copy: Copy,
+  probe: Radar, plan: MapIcon, teach: BookOpenText, review: ListChecks, timer: Timer, play: Play, pause: Pause, reset: RotateCcw,
 };
 const icon = (name, size = 20) =>
-  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]
+  !ICONS[name] ? "" : `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]
     .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(" ")}/>`)
     .join("")}</svg>`;
 for (const e of document.querySelectorAll("[data-icon]")) e.innerHTML = icon(e.dataset.icon, e.classList.contains("send") ? 20 : 20);
@@ -115,7 +116,7 @@ async function drawDiagrams(node) {
       themeVariables: {
         background: v("--bg"), primaryColor: v("--surface"), primaryTextColor: v("--text"), primaryBorderColor: v("--accent"),
         secondaryColor: v("--sidebar"), tertiaryColor: v("--bg"), lineColor: v("--muted"), textColor: v("--text"),
-        fontFamily: "Inter Variable, sans-serif", fontSize: "14px",
+        fontFamily: "Geist Variable, sans-serif", fontSize: "14px",
       },
     });
   }
@@ -1119,11 +1120,11 @@ const SUGGEST = {
 
 function renderSuggest() {
   const phase = lesson?.phase;
-  // always say which gear the lesson is in, and offer the sensible next gears
+  // which gear the lesson is in, then the sensible next moves
   const now = el("span", "now");
   now.title = "The lesson's current gear";
-  const dot = el("i");
-  now.append(dot, el("b", "", PHASES[phase] ?? ""));
+  if (PHASES[phase]) now.innerHTML = `<span class="gear-icon">${icon(phase, 15)}</span>`;
+  now.append(el("b", "", PHASES[phase] ?? ""));
 
   $("#suggest").replaceChildren(
     ...(PHASES[phase] ? [now] : []),
@@ -1460,18 +1461,30 @@ function quickStarts() {
 }
 let installed = []; // coding agents found on this computer
 
+/** Restarts an agent in its own terminal with the model and effort just picked. Its lesson memory is the
+ *  lesson state and notes, so it picks up where it left off. */
+async function restartAgent(a, kind) {
+  const tab = agentTab(a);
+  if (!tab) return;
+  const dir = tab.cwd;
+  invoke("log_note", { line: `restarting ${agentLook(a.name).label} in ${short(dir)} with ${JSON.stringify(settings.agentPrefs?.[kind] ?? {})}` }).catch(() => {});
+  startingDirs.add(dir);
+  closeTab(tab);
+  await newTab(dir, quickStarts()[kind][2]);
+  if (lesson) note(`Switching ${agentLook(a.name).label}'s model. It picks up from its notes.`);
+}
+
 /** One click: a terminal in the library folder with the agent already starting in it. */
 let starting = null; // the agent the "where" form will start, if one was picked
 let startDir = null; // where it starts: the open subject's folder
 const modelInfo = {}; // kind → what the agent offers (its models and their effort levels), read once
 
 /** The model and effort pickers for `kind`, filled from the agent itself. Effort levels follow the model. */
-async function fillModels(kind) {
+async function fillModels(kind, model = $("#where-model"), effortSel = $("#where-effort"), changed = () => {}) {
   modelInfo[kind] ??= await invoke("agent_models", { kind }).catch(() => ({ models: [] }));
   const info = modelInfo[kind];
   const prefs = (settings.agentPrefs ??= {})[kind] ??= {};
   const opt = (value, text) => Object.assign(el("option", "", text), { value });
-  const model = $("#where-model");
   const current = info.models.find((m) => m.id === info.current);
   model.replaceChildren(opt("", current ? `Default (${current.name})` : "Default"), ...info.models.map((m) => opt(m.id, m.name)));
   model.value = info.models.some((m) => m.id === prefs.model) ? prefs.model : "";
@@ -1479,14 +1492,14 @@ async function fillModels(kind) {
     const m = info.models.find((x) => x.id === (model.value || info.current)) ?? info.models[0];
     const list = m?.levels?.length ? m.levels : info.levels ?? [];
     const fallback = model.value ? m?.default : info.effort || m?.default;
-    const effort = $("#where-effort");
+    const effort = effortSel;
     effort.replaceChildren(opt("", fallback ? `Default (${fallback})` : "Default"), ...list.map((l) => opt(l, l)));
     effort.value = list.includes(prefs.effort) ? prefs.effort : "";
     prefs.effort = effort.value;
   };
   levels();
-  model.onchange = () => { prefs.model = model.value; levels(); saveSettings(); };
-  $("#where-effort").onchange = () => { prefs.effort = $("#where-effort").value; saveSettings(); };
+  model.onchange = () => { prefs.model = model.value; levels(); saveSettings(); changed(); };
+  effortSel.onchange = () => { prefs.effort = effortSel.value; saveSettings(); changed(); };
 }
 
 function startAgent(kind) {
@@ -1599,6 +1612,71 @@ function openTerminal() {
   setDrawer(true);
   if (tabs.length) showWhere(); // a new terminal for another agent
 }
+
+// ---------- focus timer (pomodoro): 25 minutes of focus, then a 5-minute break, a longer one every fourth ----------
+
+// ponytail: fixed lengths; add a setting if anyone wants 50/10
+const POMO = { focus: 25 * 60, break: 5 * 60, long: 15 * 60 };
+let pomo = store.get("learn.pomo", { mode: "idle", ends: 0, left: 0, count: 0 }); // ends > 0 running, left > 0 paused
+
+const savePomo = () => store.set("learn.pomo", pomo);
+const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function chime() {
+  try {
+    const a = new AudioContext();
+    for (const [i, f] of [660, 880].entries()) {
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, a.currentTime + i * 0.18);
+      g.gain.exponentialRampToValueAtTime(0.15, a.currentTime + i * 0.18 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + i * 0.18 + 0.5);
+      o.connect(g).connect(a.destination);
+      o.start(a.currentTime + i * 0.18);
+      o.stop(a.currentTime + i * 0.18 + 0.55);
+    }
+  } catch { /* no audio: the label still changes */ }
+}
+
+function renderPomo() {
+  const b = $("#pomo");
+  const running = pomo.ends > 0;
+  const left = running ? Math.max(0, (pomo.ends - Date.now()) / 1000) : pomo.left;
+  const total = POMO[pomo.mode] ?? POMO.focus;
+  $("#pomo-time").textContent = pomo.mode === "idle" ? "Focus" : `${pomo.mode === "focus" ? "" : "Break "}${clock(left)}`;
+  b.className = `pomo ${pomo.mode}${running ? " running" : pomo.mode !== "idle" ? " paused" : ""}`;
+  b.style.setProperty("--p", pomo.mode === "idle" ? 0 : 1 - left / total);
+  if (running && left <= 0) {
+    chime();
+    if (pomo.mode === "focus") {
+      pomo.count++;
+      const long = pomo.count % 4 === 0;
+      pomo = { ...pomo, mode: long ? "long" : "break", ends: Date.now() + (long ? POMO.long : POMO.break) * 1000, left: 0 };
+      if (lesson) note(long ? "Four focus sessions done. Take 15 minutes." : "Focus session done. Take 5.");
+    } else {
+      pomo = { ...pomo, mode: "idle", ends: 0, left: 0 };
+      if (lesson) note("Break's over. Start the timer when you're ready.");
+    }
+    savePomo();
+    renderPomo();
+  }
+}
+$("#pomo").onclick = () => {
+  if (pomo.mode === "idle") pomo = { ...pomo, mode: "focus", ends: Date.now() + POMO.focus * 1000, left: 0 };
+  else if (pomo.ends) pomo = { ...pomo, left: (pomo.ends - Date.now()) / 1000, ends: 0 }; // pause
+  else pomo = { ...pomo, ends: Date.now() + pomo.left * 1000, left: 0 }; // resume
+  savePomo();
+  renderPomo();
+};
+$("#pomo").oncontextmenu = (e) => {
+  e.preventDefault();
+  pomo = { mode: "idle", ends: 0, left: 0, count: 0 };
+  savePomo();
+  renderPomo();
+};
+setInterval(renderPomo, 1000);
+renderPomo();
 
 // ---------- the Log tab: what happened, one line per fact (agents, messages, tool calls, errors) ----------
 
@@ -1757,7 +1835,27 @@ async function renderPop() {
   term.append(el("span", "name muted", "Other agent…"));
   term.title = "Open a terminal to start any coding agent";
   term.onclick = () => { pop.hidden = true; openTerminal(); };
-  parts.push(term, el("hr"));
+  parts.push(term);
+  // the current subject's agent: switch its model or effort here; it restarts in its terminal with them
+  const current = agentFor();
+  const kind = current && { claude: "claude", openai: "codex" }[agentLook(current.name).logo];
+  if (kind && agentTab(current)) {
+    const box = el("div", "switch");
+    const model = el("select");
+    const effort = el("select");
+    const label = (text, sel) => {
+      const l = el("label", "", text);
+      l.append(sel);
+      return l;
+    };
+    box.append(label("Model", model), label("Effort", effort));
+    for (const e of [box, model, effort]) e.onclick = (ev) => ev.stopPropagation();
+    let timer;
+    // picking a model then an effort restarts it once, not twice
+    fillModels(kind, model, effort, () => { clearTimeout(timer); timer = setTimeout(() => restartAgent(current, kind), 1200); });
+    parts.push(box);
+  }
+  parts.push(el("hr"));
   const p = provider();
   const api = option(p.logo, p.label, p.model || "Not set up", !usingAgent(), async () => {
     if (!(await ready())) return openModel();

@@ -36,6 +36,13 @@ async function subjectFlow(browser, engine) {
   await page.locator("#tree .row.lesson").click();
   await page.waitForTimeout(300);
   assert.equal(await page.evaluate(() => window.__opened.length), 1, "reopening the subject doesn't start a second one");
+  // the focus timer: start, pause, reset
+  await page.locator("#pomo").click();
+  await page.locator("#pomo.running").getByText(/^2[45]:\d\d$/).waitFor();
+  await page.locator("#pomo").click();
+  await page.locator("#pomo.paused").waitFor();
+  await page.locator("#pomo").click({ button: "right" });
+  await page.locator("#pomo-time").getByText("Focus", { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   await page.close();
   console.log(`${engine} UI passed: an agent per subject, started in its folder`);
