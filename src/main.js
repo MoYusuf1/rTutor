@@ -470,7 +470,7 @@ function menu(x, y, entries) {
 }
 addEventListener("click", (e) => {
   if (!e.target.closest("#menu")) $("#menu").hidden = true;
-  if (!e.target.closest("#pop, #model")) $("#pop").hidden = true;
+  if (!e.composedPath().some((n) => n.id === "pop" || n.id === "model")) $("#pop").hidden = true;
 });
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
@@ -1642,14 +1642,18 @@ function openTerminal() {
   if (tabs.length) showWhere(); // a new terminal for another agent
 }
 
-// ---------- focus timer (pomodoro): 25 minutes of focus, then a 5-minute break, a longer one every fourth ----------
+// ---------- focus timer (pomodoro), like Pomofocus: focus, short break, long break, with saved lengths ----------
 
-// ponytail: fixed lengths; add a setting if anyone wants 50/10
-const POMO = { focus: 25 * 60, break: 5 * 60, long: 15 * 60 };
-let pomo = store.get("learn.pomo", { mode: "idle", ends: 0, left: 0, count: 0 }); // ends > 0 running, left > 0 paused
+const POMO_DEFAULTS = { focus: 25, short: 5, long: 15, every: 4, autoBreak: true, autoFocus: false };
+const POMO_LABEL = { focus: "Pomodoro", short: "Short break", long: "Long break" };
+const pomoSet = () => ({ ...POMO_DEFAULTS, ...(settings.pomo ?? {}) }); // lengths and switches, saved with the app's settings
+// the running clock lives in the window, so a restart doesn't lose a session in progress
+let pomo = store.get("learn.pomo2", { mode: "focus", ends: 0, left: null, count: 1 });
 
-const savePomo = () => store.set("learn.pomo", pomo);
-const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const savePomo = () => store.set("learn.pomo2", pomo);
+const clock = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const pomoLength = (mode = pomo.mode) => pomoSet()[mode] * 60;
+const pomoLeft = () => Math.max(0, pomo.ends ? (pomo.ends - Date.now()) / 1000 : pomo.left ?? pomoLength());
 
 function chime() {
   try {
@@ -1668,44 +1672,113 @@ function chime() {
   } catch { /* no audio: the label still changes */ }
 }
 
-function renderPomo() {
-  const b = $("#pomo");
-  const running = pomo.ends > 0;
-  const left = running ? Math.max(0, (pomo.ends - Date.now()) / 1000) : pomo.left;
-  const total = POMO[pomo.mode] ?? POMO.focus;
-  $("#pomo-time").textContent = pomo.mode === "idle" ? "Focus" : `${pomo.mode === "focus" ? "" : "Break "}${clock(left)}`;
-  b.className = `pomo ${pomo.mode}${running ? " running" : pomo.mode !== "idle" ? " paused" : ""}`;
-  b.style.setProperty("--p", pomo.mode === "idle" ? 0 : 1 - left / total);
-  if (running && left <= 0) {
-    chime();
-    if (pomo.mode === "focus") {
-      pomo.count++;
-      const long = pomo.count % 4 === 0;
-      pomo = { ...pomo, mode: long ? "long" : "break", ends: Date.now() + (long ? POMO.long : POMO.break) * 1000, left: 0 };
-      if (lesson) note(long ? "Four focus sessions done. Take 15 minutes." : "Focus session done. Take 5.");
-    } else {
-      pomo = { ...pomo, mode: "idle", ends: 0, left: 0 };
-      if (lesson) note("Break's over. Start the timer when you're ready.");
-    }
-    savePomo();
-    renderPomo();
-  }
+function pomoTo(mode, run = false) {
+  pomo = { ...pomo, mode, left: null, ends: run ? Date.now() + pomoLength(mode) * 1000 : 0 };
+  savePomo();
+  renderPomo(true);
 }
-$("#pomo").onclick = () => {
-  if (pomo.mode === "idle") pomo = { ...pomo, mode: "focus", ends: Date.now() + POMO.focus * 1000, left: 0 };
-  else if (pomo.ends) pomo = { ...pomo, left: (pomo.ends - Date.now()) / 1000, ends: 0 }; // pause
-  else pomo = { ...pomo, ends: Date.now() + pomo.left * 1000, left: 0 }; // resume
+function pomoToggle() {
+  if (pomo.ends) pomo = { ...pomo, left: pomoLeft(), ends: 0 }; // pause
+  else pomo = { ...pomo, ends: Date.now() + pomoLeft() * 1000, left: null }; // start or resume
   savePomo();
-  renderPomo();
+  renderPomo(true);
+}
+
+/** The button by Sources, and the panel when it's open. `full` redraws the panel too (not just its clock). */
+function renderPomo(full = false) {
+  const left = pomoLeft();
+  const running = pomo.ends > 0;
+  const started = running || pomo.left != null;
+  if (running && left <= 0) {
+    // a session ends: a chime, a note, and on to the next one
+    chime();
+    const set = pomoSet();
+    if (pomo.mode === "focus") {
+      const next = pomo.count % set.every === 0 ? "long" : "short";
+      pomo.count++;
+      if (lesson) note(next === "long" ? `${set.every} focus sessions done. Take ${set.long} minutes.` : `Focus session done. Take ${set.short}.`);
+      pomoTo(next, set.autoBreak);
+    } else {
+      if (lesson) note("Break's over. Time to focus.");
+      pomoTo("focus", set.autoFocus);
+    }
+    return;
+  }
+  const b = $("#pomo");
+  $("#pomo-time").textContent = started ? clock(left) : "Focus";
+  b.className = `pomo ${pomo.mode}${running ? " running" : started ? " paused" : ""}`;
+  b.style.setProperty("--p", started ? 1 - left / pomoLength() : 0);
+  const pop = $("#pomo-pop");
+  if (pop.hidden) return;
+  if (!full && pop.querySelector(".big")) {
+    pop.querySelector(".big").textContent = clock(left);
+    return;
+  }
+  const set = pomoSet();
+  const tabs = el("div", "pomo-tabs");
+  for (const [mode, label] of Object.entries(POMO_LABEL)) {
+    const t = el("button", mode === pomo.mode ? "on" : "", label);
+    t.type = "button";
+    t.onclick = () => pomoTo(mode);
+    tabs.append(t);
+  }
+  const go = el("button", "primary go", running ? "Pause" : started ? "Resume" : "Start");
+  go.type = "button";
+  go.onclick = pomoToggle;
+  const reset = el("button", "icon");
+  reset.type = "button";
+  reset.title = "Restart this session";
+  reset.innerHTML = icon("reset", 18);
+  reset.onclick = () => pomoTo(pomo.mode);
+  const controls = el("div", "pomo-controls");
+  controls.append(go, reset);
+  const status = el("p", "pomo-status", `#${pomo.count} · ${pomo.mode === "focus" ? "Time to focus!" : "Time for a break!"}`);
+  // settings, remembered with the rest of the app's settings
+  const opts = el("details", "pomo-opts");
+  opts.append(el("summary", "", "Timer settings"));
+  const save = (patch) => {
+    settings.pomo = { ...set, ...patch };
+    saveSettings();
+    if (!pomo.ends && pomo.left == null) renderPomo(true); // an idle clock shows the new length
+  };
+  const grid = el("div", "pomo-grid");
+  for (const [key, label] of [["focus", "Pomodoro"], ["short", "Short break"], ["long", "Long break"], ["every", "Long break every"]]) {
+    const l = el("label", "", label);
+    const n = Object.assign(el("input"), { type: "number", min: 1, max: key === "every" ? 12 : 180, value: set[key] });
+    n.onchange = () => {
+      const v = Math.round(Number(n.value));
+      if (v >= Number(n.min) && v <= Number(n.max)) save({ [key]: v });
+      else n.value = set[key];
+    };
+    const unit = el("span", "unit", key === "every" ? "sessions" : "min");
+    const row = el("div", "num");
+    row.append(n, unit);
+    l.append(row);
+    grid.append(l);
+  }
+  const toggle = (key, label) => {
+    const l = el("label", "switch-row", label);
+    const c = Object.assign(el("input"), { type: "checkbox", checked: set[key] });
+    c.onchange = () => save({ [key]: c.checked });
+    l.prepend(c);
+    return l;
+  };
+  opts.append(grid, toggle("autoBreak", "Start breaks automatically"), toggle("autoFocus", "Start the next focus automatically"));
+  opts.open = store.get("learn.pomoOpts", false);
+  opts.ontoggle = () => store.set("learn.pomoOpts", opts.open);
+  pop.replaceChildren(tabs, el("div", "big", clock(left)), controls, status, opts);
+}
+
+$("#pomo").onclick = (e) => {
+  e.stopPropagation();
+  $("#pomo-pop").hidden = !$("#pomo-pop").hidden;
+  toggleSources(false);
+  renderPomo(true);
 };
-$("#pomo").oncontextmenu = (e) => {
-  e.preventDefault();
-  pomo = { mode: "idle", ends: 0, left: 0, count: 0 };
-  savePomo();
-  renderPomo();
-};
-setInterval(renderPomo, 1000);
-renderPomo();
+$("#pomo").oncontextmenu = (e) => { e.preventDefault(); pomoTo(pomo.mode); };
+// the path is taken when the click happens: a panel that redraws itself under the click still counts as inside
+const clickedIn = (e, ...ids) => e.composedPath().some((n) => ids.includes(n.id));
+addEventListener("click", (e) => { if (!clickedIn(e, "pomo-pop", "pomo")) $("#pomo-pop").hidden = true; });
 
 // ---------- the Log tab: what happened, one line per fact (agents, messages, tool calls, errors) ----------
 
@@ -2036,6 +2109,8 @@ settings = { ...settings, ...((await invoke("get_settings")) ?? {}) };
 if (!["agent", "api"].includes(settings.active)) settings.active = "agent"; // older settings named a provider here
 if (!PRESETS[settings.api]) settings.api = "nvidia";
 await invoke("agent_listen", { onEvent: agentEvents }).catch(() => {});
+setInterval(renderPomo, 1000); // the timer reads its lengths from the settings just loaded
+renderPomo();
 ({ bin: mcpBin, home } = await invoke("mcp_command").catch(() => ({ bin: "rtutor", home: "" })));
 installed = await invoke("installed_agents").catch(() => []);
 showWho();

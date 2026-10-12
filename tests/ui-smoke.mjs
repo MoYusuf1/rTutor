@@ -14,7 +14,7 @@ async function subjectFlow(browser, engine) {
     window.__TAURI_INTERNALS__ = {
       transformCallback: () => 1,
       unregisterCallback: () => {},
-      invoke: async (command, args = {}) => command === "term_open" ? void window.__opened.push(args) : ({
+      invoke: async (command, args = {}) => command === "term_open" ? void window.__opened.push(args) : command === "save_settings" ? void (window.__saved = structuredClone(args.settings)) : ({
         get_settings: { active: "agent", providers: {}, main: { kind: "codex", name: "codex-mcp-client" } },
         mcp_command: { bin: "/opt/rtutor", home: "/home/me" },
         tree: { folders: [{ id: 1, parent: null, name: "Somali", dir: "/home/me/rtutor/Somali" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }], sources: [] },
@@ -36,13 +36,21 @@ async function subjectFlow(browser, engine) {
   await page.locator("#tree .row.lesson").click();
   await page.waitForTimeout(300);
   assert.equal(await page.evaluate(() => window.__opened.length), 1, "reopening the subject doesn't start a second one");
-  // the focus timer: start, pause, reset
+  // the focus timer panel: modes, start and pause, and lengths that are saved
   await page.locator("#pomo").click();
-  await page.locator("#pomo.running").getByText(/^2[45]:\d\d$/).waitFor();
-  await page.locator("#pomo").click();
+  await page.locator("#pomo-pop .big").getByText("25:00").waitFor();
+  await page.locator("#pomo-pop").getByText("Start", { exact: true }).click();
+  await page.locator("#pomo.running").waitFor();
+  await page.locator("#pomo-pop").getByText("Pause", { exact: true }).click();
   await page.locator("#pomo.paused").waitFor();
-  await page.locator("#pomo").click({ button: "right" });
-  await page.locator("#pomo-time").getByText("Focus", { exact: true }).waitFor();
+  await page.locator("#pomo-pop .pomo-tabs").getByText("Short break").click();
+  await page.locator("#pomo-pop .big").getByText("05:00").waitFor();
+  await page.locator("#pomo-pop summary").click();
+  await page.locator("#pomo-pop .pomo-grid input").first().fill("50");
+  await page.locator("#pomo-pop .pomo-grid input").first().dispatchEvent("change");
+  await page.waitForFunction(() => window.__saved?.pomo?.focus === 50);
+  await page.locator("#pomo-pop .pomo-tabs").getByText("Pomodoro", { exact: true }).click();
+  await page.locator("#pomo-pop .big").getByText("50:00").waitFor();
   assert.deepEqual(errors, []);
   await page.close();
   console.log(`${engine} UI passed: an agent per subject, started in its folder`);

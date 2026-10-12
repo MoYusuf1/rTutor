@@ -498,7 +498,30 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .pomo .ring { position: absolute; inset: auto 0 0 0; height: 3px; background: linear-gradient(90deg, var(--accent) calc(var(--p, 0) * 100%), transparent 0); }
 .pomo.running { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .pomo.paused { color: var(--text); }
-.pomo.paused #pomo-time::after { content: " · paused"; color: var(--muted); font-size: 12.5px; }
-.pomo.break, .pomo.long { color: var(--ok); }
-.pomo.break .ring, .pomo.long .ring { background: linear-gradient(90deg, var(--ok) calc(var(--p, 0) * 100%), transparent 0); }
+.pomo.short.running, .pomo.long.running { color: var(--quiz); }
+.pomo.short .ring, .pomo.long .ring { background: linear-gradient(90deg, var(--quiz) calc(var(--p, 0) * 100%), transparent 0); }
 .model-name { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--accent); border-radius: 10px; background: var(--bg); color: var(--text); font: 13.5px var(--ui); outline: 0; }
+
+/* the timer panel */
+#pomo-pop { position: absolute; z-index: 4; top: 64px; right: calc(min(var(--chat-w), 100% - 360px) + 16px); width: min(360px, 60%);
+  padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); text-align: center; }
+#pomo-pop:not([hidden]) { animation: pop 0.14s ease-out; }
+.pomo-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--hover); }
+.pomo-tabs button { flex: 1; padding: 7px 4px; border-radius: 9px; color: var(--muted); font: 500 13.5px var(--ui); }
+.pomo-tabs button:hover { color: var(--text); }
+.pomo-tabs button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px #0000001a; }
+#pomo-pop .big { margin: 18px 0 14px; font: 600 64px/1 var(--ui); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--text); }
+.pomo-controls { display: flex; justify-content: center; align-items: center; gap: 8px; }
+.pomo-controls .go { min-width: 150px; padding: 11px 20px; border-radius: 12px; font-size: 15px; letter-spacing: 0.02em; }
+.pomo-status { margin: 12px 0 4px; font-size: 13.5px; color: var(--muted); }
+.pomo-opts { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); text-align: left; }
+.pomo-opts summary { cursor: pointer; list-style: none; font-size: 13px; font-weight: 600; color: var(--muted); }
+.pomo-opts summary::before { content: "▸ "; } .pomo-opts[open] summary::before { content: "▾ "; }
+.pomo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 8px; }
+.pomo-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.pomo-grid .num { display: flex; align-items: center; gap: 6px; }
+.pomo-grid input { width: 72px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 14px var(--ui); }
+.pomo-grid input:focus { border-color: var(--accent); outline: 0; }
+.pomo-grid .unit { font-weight: 400; font-size: 12.5px; }
+.switch-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13.5px; color: var(--text); cursor: pointer; }
+.switch-row input { accent-color: var(--accent); width: 16px; height: 16px; }
