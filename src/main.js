@@ -1772,9 +1772,17 @@ function renderPomo(full = false) {
       renderPomo(true);
     }, "Type the minutes", 2), ":00");
   }
-  // sessions: which one this is, out of how many before the long break (that number is typed too)
-  const round = el("p", "pomo-round");
-  round.append(`Session ${((pomo.count - 1) % set.every) + 1} of `, editable(set.every, 1, 12, (v) => { save({ every: v }); renderPomo(true); }, "Sessions before the long break"));
+  // rounds: which one this is, out of how many before the long break; − and + change how many
+  const round = el("div", "pomo-round");
+  const step = (d) => {
+    const b = el("button", "step", d < 0 ? "−" : "+");
+    b.type = "button";
+    b.title = d < 0 ? "One round fewer" : "One more round";
+    b.disabled = d < 0 ? set.every <= 1 : set.every >= 12;
+    b.onclick = () => { save({ every: set.every + d }); renderPomo(true); };
+    return b;
+  };
+  round.append(step(-1), el("span", "", `Round ${((pomo.count - 1) % set.every) + 1} of ${set.every}`), step(1));
   pop.replaceChildren(tabs, big, controls, round);
 }
 

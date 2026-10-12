@@ -52,11 +52,10 @@ async function subjectFlow(browser, engine) {
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => window.__saved?.pomo?.focus === 50);
   await page.locator("#pomo-pop .big").getByText("50").waitFor();
-  await page.locator("#pomo-pop .pomo-round .num-edit").click();
-  await page.keyboard.type("5");
-  await page.keyboard.press("Enter");
+  await page.locator("#pomo-pop .pomo-round").getByText("Round 1 of 4").waitFor();
+  await page.locator("#pomo-pop .pomo-round .step").last().click();
   await page.waitForFunction(() => window.__saved?.pomo?.every === 5);
-  await page.locator("#pomo-pop .pomo-round").getByText(/^Session 1 of/).waitFor();
+  await page.locator("#pomo-pop .pomo-round").getByText("Round 1 of 5").waitFor();
   assert.deepEqual(errors, []);
   await page.close();
   console.log(`${engine} UI passed: an agent per subject, started in its folder`);

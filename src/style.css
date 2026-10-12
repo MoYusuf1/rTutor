@@ -519,5 +519,6 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .num-edit:hover { background: var(--hover); }
 .num-edit:focus { background: var(--accent-soft); color: var(--accent); }
 .num-edit::selection { background: transparent; }
-.pomo-round { margin: 14px 0 2px; font-size: 13.5px; color: var(--muted); }
-.pomo-round .num-edit { padding: 1px 6px; font-weight: 600; color: var(--text); }
+.pomo-round { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0 2px; font-size: 13.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pomo-round .step { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-size: 15px; line-height: 1; }
+.pomo-round .step:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
