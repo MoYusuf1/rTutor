@@ -1710,10 +1710,11 @@ function renderPomo(full = false) {
   b.style.setProperty("--p", started ? 1 - left / pomoLength() : 0);
   const pop = $("#pomo-pop");
   if (pop.hidden) return;
-  if (!full && pop.querySelector(".big")) {
-    pop.querySelector(".big").textContent = clock(left);
+  if (!full && pop.querySelector("button.big")) {
+    pop.querySelector("button.big").textContent = clock(left);
     return;
   }
+  if (!full && pop.querySelector(".big.edit")) return; // don't redraw under someone typing
   const set = pomoSet();
   const tabs = el("div", "pomo-tabs");
   for (const [mode, label] of Object.entries(POMO_LABEL)) {
@@ -1732,41 +1733,53 @@ function renderPomo(full = false) {
   reset.onclick = () => pomoTo(pomo.mode);
   const controls = el("div", "pomo-controls");
   controls.append(go, reset);
-  const status = el("p", "pomo-status", `#${pomo.count} · ${pomo.mode === "focus" ? "Time to focus!" : "Time for a break!"}`);
-  // settings, remembered with the rest of the app's settings
-  const opts = el("details", "pomo-opts");
-  opts.append(el("summary", "", "Timer settings"));
   const save = (patch) => {
     settings.pomo = { ...set, ...patch };
     saveSettings();
-    if (!pomo.ends && pomo.left == null) renderPomo(true); // an idle clock shows the new length
   };
-  const grid = el("div", "pomo-grid");
-  for (const [key, label] of [["focus", "Pomodoro"], ["short", "Short break"], ["long", "Long break"], ["every", "Long break every"]]) {
-    const l = el("label", "", label);
-    const n = Object.assign(el("input"), { type: "number", min: 1, max: key === "every" ? 12 : 180, value: set[key] });
-    n.onchange = () => {
-      const v = Math.round(Number(n.value));
-      if (v >= Number(n.min) && v <= Number(n.max)) save({ [key]: v });
-      else n.value = set[key];
+  // the clock is the setting: click it (when it isn't running) and type the minutes
+  const big = el("button", "big", clock(left));
+  big.type = "button";
+  big.title = running ? "" : "Click to change the length";
+  big.disabled = running;
+  big.onclick = () => {
+    const input = Object.assign(el("input", "big-edit"), { type: "number", min: 1, max: 180, value: set[pomo.mode] });
+    const wrap = el("div", "big edit");
+    wrap.append(input, el("span", "unit", "min"));
+    big.replaceWith(wrap);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const v = Math.round(Number(input.value));
+      if (keep && v >= 1 && v <= 180) {
+        save({ [pomo.mode]: v });
+        pomo = { ...pomo, left: null, ends: 0 };
+        savePomo();
+      }
+      renderPomo(true);
     };
-    const unit = el("span", "unit", key === "every" ? "sessions" : "min");
-    const row = el("div", "num");
-    row.append(n, unit);
-    l.append(row);
-    grid.append(l);
-  }
-  const toggle = (key, label) => {
-    const l = el("label", "switch-row", label);
-    const c = Object.assign(el("input"), { type: "checkbox", checked: set[key] });
-    c.onchange = () => save({ [key]: c.checked });
-    l.prepend(c);
-    return l;
+    input.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
+    input.onblur = () => finish(true);
   };
-  opts.append(grid, toggle("autoBreak", "Start breaks automatically"), toggle("autoFocus", "Start the next focus automatically"));
-  opts.open = store.get("learn.pomoOpts", false);
-  opts.ontoggle = () => store.set("learn.pomoOpts", opts.open);
-  pop.replaceChildren(tabs, el("div", "big", clock(left)), controls, status, opts);
+  // sessions in this round: done ones filled, the current one ringed; − and + set how many before the long break
+  const round = el("div", "pomo-round");
+  const done = (pomo.count - 1) % set.every;
+  const dots = el("div", "dots-row");
+  for (let k = 0; k < set.every; k++) dots.append(el("span", k < done ? "done" : k === done && pomo.mode === "focus" ? "now" : ""));
+  const step = (d, label) => {
+    const b = el("button", "icon step", d < 0 ? "−" : "+");
+    b.type = "button";
+    b.title = label;
+    b.disabled = d < 0 ? set.every <= 1 : set.every >= 12;
+    b.onclick = () => { save({ every: set.every + d }); renderPomo(true); };
+    return b;
+  };
+  round.append(step(-1, "Fewer sessions before the long break"), dots, step(1, "More sessions before the long break"));
+  round.title = `${set.every} sessions, then a long break`;
+  pop.replaceChildren(tabs, big, controls, round);
 }
 
 $("#pomo").onclick = (e) => {
