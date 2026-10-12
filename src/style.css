@@ -398,7 +398,7 @@ dialog input { padding: 11px 12px; border-radius: 12px; font-size: 15px; }
 .opt-row .auto { padding: 2px 8px; border-radius: 999px; background: var(--hover); color: var(--muted); font-size: 11.5px; font-weight: 600; }
 .opt-row .auto:hover { color: var(--bad); }
 #sources-pop header { padding: 4px 8px 8px; }
-.mark { border-radius: 7px; }
+.mark { border-radius: 0; }
 
 /* ---------- polish ---------- */
 /* stop keeps the send button's teal; only the glyph changes, with a soft ring while it works */
