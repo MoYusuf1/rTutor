@@ -7,25 +7,26 @@
 @font-face { font-family: "Literata Variable"; font-style: italic; font-weight: 200 900; font-display: swap;
   src: url("../node_modules/@fontsource-variable/literata/files/literata-latin-wght-italic.woff2") format("woff2"); }
 
-/* "Ink & jade". Light: warm ivory paper and deep ink. Dark: a cool, quiet charcoal.
-   One jade accent; green / red / amber only for answers and warnings. */
+/* "Jade". Neutrals carry a trace of the accent's green, so everything sits in one family.
+   Light: cool mint-white paper and green-black ink. Dark: deep green-black, like a chalkboard at night.
+   Jade is the one accent; amber marks warnings, coral marks a wrong answer. */
 :root {
-  --bg: #f8f7f3; --surface: #ffffff; --sidebar: #f1efe9; --hover: #e8e5dd;
-  --text: #191a1c; --muted: #66656a; --faint: #a3a1a3; --line: #e3e0d8;
-  --accent: #0d7a6b; --accent-text: #ffffff; --accent-soft: #0d7a6b14;
-  --ok: #2d8a55; --bad: #c24a2f; --quiz: #b07a1e;
-  --shadow: 0 1px 2px #191a1c0d, 0 8px 28px #191a1c14;
+  --bg: #f5f8f6; --surface: #ffffff; --sidebar: #edf2ef; --hover: #e2eae6;
+  --text: #13201c; --muted: #5b6b66; --faint: #97a6a1; --line: #dbe4e0;
+  --accent: #0b8670; --accent-text: #ffffff; --accent-soft: #0b867014;
+  --ok: #0b8670; --bad: #d4543a; --quiz: #c08a1c;
+  --shadow: 0 1px 2px #13201c0d, 0 8px 28px #13201c14;
   --ui: "Geist Variable", system-ui, sans-serif;
   --read: "Literata Variable", Georgia, serif;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #131416; --surface: #1b1c1f; --sidebar: #0f1012; --hover: #25272b;
-    --text: #e9e8e4; --muted: #a2a1a0; --faint: #6c6c6f; --line: #2a2c30;
-    --accent: #52d3b8; --accent-text: #052620; --accent-soft: #52d3b81c;
-    --ok: #66c98c; --bad: #ef7a5e; --quiz: #e2b55b;
-    --shadow: 0 1px 2px #00000059, 0 10px 32px #00000066;
+    --bg: #0e1513; --surface: #141d1a; --sidebar: #0a100e; --hover: #1d2825; --line: #22302c;
+    --text: #e3ece8; --muted: #93a6a0; --faint: #5f736d;
+    --accent: #3fd0b0; --accent-text: #032019; --accent-soft: #3fd0b01c;
+    --ok: #3fd0b0; --bad: #f07a62; --quiz: #e7b85a;
+    --shadow: 0 1px 2px #00000059, 0 10px 32px #0000006b;
   }
 }
 
