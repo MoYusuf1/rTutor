@@ -180,11 +180,27 @@ const log = () => $("#log");
 function chatNode(node) {
   if (work) thinking(false);
   log().append(node);
-  log().scrollTop = log().scrollHeight;
+  if (restoring) log().scrollTop = log().scrollHeight;
+  else requestAnimationFrame(() => log().scrollTo({ top: log().scrollHeight, behavior: "smooth" }));
   return node;
 }
 function say(text, who = "bot") {
-  chatNode(el("div", `msg ${who}`)).append(md(text));
+  chatNode(el("div", `msg ${who}${restoring ? "" : " appear"}`)).append(md(text));
+}
+let restoring = false; // reopening a lesson: its history shows at once, without the arrival animation
+
+/** New lesson content writes itself in, and the canvas glides to it so the newest part is in view. */
+function reveal(box) {
+  box.classList.add("appear");
+  requestAnimationFrame(() => box.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" }));
+}
+
+/** Shows the latest of a lesson: the start of its newest section, and the end of the chat. */
+function showLatest() {
+  const last = $("#canvas-body").lastElementChild;
+  if (last) last.scrollIntoView({ block: "start" });
+  else $("#canvas").scrollTop = 0;
+  log().scrollTop = log().scrollHeight;
 }
 const note = (text) => chatNode(el("div", "meta", text));
 // While the tutor works, a collapsible "Thinking…" block shows what it is doing: its reasoning (API models
@@ -762,6 +778,7 @@ async function openLesson(id) {
   lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sections.length, toolResults: l.toolResults ?? {}, phase: null, last: null };
   target = l.folder;
   showLesson();
+  restoring = true;
   for (const m of l.sections) {
     const node = md(m);
     $("#canvas-body").append(node);
@@ -779,6 +796,10 @@ async function openLesson(id) {
       }
     }
   }
+  restoring = false;
+  // open on the newest part, not the top (diagrams and fonts settle a moment later, so look again)
+  showLatest();
+  setTimeout(() => mine === gen && showLatest(), 400);
   // no phase reported yet: the gear the lesson was started in
   const opener = l.messages[0]?.content;
   lesson.phase ??= typeof opener === "string" ? Object.values(GEARS).find((g) => opener.endsWith(g.tell))?.phase ?? null : null;
@@ -927,7 +948,7 @@ async function addSection(markdown, live, to = lesson) {
     const box = md(markdown);
     $("#canvas-body").append(box);
     drawDiagrams(box);
-    follow(box);
+    reveal(box);
   }
   await invoke("add_section", { lesson: to.id, markdown });
   // the first heading the tutor writes becomes the lesson title (shown once, not twice)

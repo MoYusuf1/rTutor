@@ -203,7 +203,16 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 .notes .md { margin-top: 6px; color: var(--text); } .notes .md > :last-child { margin-bottom: 0; }
 #canvas-body, #doc-body { max-width: 900px; margin: 0 auto; font: 18px/1.7 var(--read); }
 #doc-body pre.plain { white-space: pre-wrap; font: inherit; margin: 24px 0; }
-#canvas-body > * { margin-top: 28px; animation: rise 0.25s ease; }
+#canvas-body > * { margin-top: 28px; scroll-margin-top: 24px; }
+/* new content writes itself in from the top, the way a teacher writes on a board */
+#canvas-body > .appear { animation: write-in 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes write-in {
+  from { opacity: 0; transform: translateY(12px); clip-path: inset(0 0 100% 0); filter: blur(3px); }
+  55% { opacity: 1; filter: blur(0); }
+  to { opacity: 1; transform: none; clip-path: inset(0 0 -20px 0); }
+}
+.msg.appear { animation: chat-in 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes chat-in { from { opacity: 0; transform: translateY(8px); } }
 #canvas-body h1, #canvas-body h2, #canvas-body h3 { line-height: 1.25; letter-spacing: -0.01em; }
 #canvas-body h1 { font-size: 1.6em; } #canvas-body h2 { font-size: 1.3em; } #canvas-body h3 { font-size: 1.1em; }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
@@ -224,7 +233,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 .msg .md strong { font-weight: 650; }
 .msg .md pre { max-width: 100%; font-size: 12.5px; letter-spacing: 0; }
 .msg .md a { text-underline-offset: 3px; }
-.msg.user { align-self: flex-end; max-width: 85%; padding: 10px 16px; border-radius: 18px; border-bottom-right-radius: 6px; background: var(--hover); animation: rise 0.2s ease; }
+.msg.user { align-self: flex-end; max-width: 85%; padding: 10px 16px; border-radius: 18px; border-bottom-right-radius: 6px; background: var(--hover); }
 .msg.bot { align-self: flex-start; padding: 0 2px; }
 .meta { color: var(--muted); font-size: 13px; }
 .work { color: var(--muted); font-size: 14px; flex-shrink: 0; }
@@ -460,3 +469,4 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .where-opts { display: flex; gap: 10px; justify-content: center; }
 .where-opts label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-align: left; }
 .where-opts select { min-width: 170px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font: 14px var(--ui); }
+.sources-btn #sources-count:empty { display: none; }

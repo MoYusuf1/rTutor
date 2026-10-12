@@ -18,7 +18,8 @@ async function subjectFlow(browser, engine) {
         get_settings: { active: "agent", providers: {}, main: { kind: "codex", name: "codex-mcp-client" } },
         mcp_command: { bin: "/opt/rtutor", home: "/home/me" },
         tree: { folders: [{ id: 1, parent: null, name: "Somali", dir: "/home/me/rtutor/Somali" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }], sources: [] },
-        get_lesson: { title: "Greetings", folder: 1, state: "", sections: [], messages: [], toolResults: {} },
+        get_lesson: { title: "Greetings", folder: 1, state: "", toolResults: {}, messages: [],
+          sections: Array.from({ length: 30 }, (_, i) => `## Part ${i + 1}\n${"Somali greetings change with the time of day. ".repeat(12)}`) },
       })[command],
     };
   });
@@ -28,6 +29,9 @@ async function subjectFlow(browser, engine) {
   await page.waitForFunction(() => window.__opened.length === 1);
   const [opened] = await page.evaluate(() => window.__opened);
   assert.equal(opened.cwd, "/home/me/rtutor/Somali", "the agent starts in the subject's folder");
+  // a long lesson opens on its newest part, not the top
+  await page.waitForFunction(() => document.querySelector("#canvas").scrollTop > 1000);
+  assert.ok(await page.locator("#canvas-body").getByText("Part 30").isVisible(), "the latest section is in view");
   assert.match(opened.run, /^codex .*mcp_servers\.rtutor/, "with the agent picked to start automatically");
   await page.locator("#tree .row.lesson").click();
   await page.waitForTimeout(300);
@@ -117,6 +121,7 @@ async function agentFlow(browser, engine) {
   await page.locator(".msg.bot").getByText("Good question, see the canvas.").waitFor();
   await emit({ type: "call", id: 4, agent: 7, lesson: 1, name: "write_lesson", input: { markdown: "# Voltage\nPush per charge." } });
   await page.locator("#canvas-body").getByText("Push per charge.").waitFor();
+  assert.equal(await page.locator("#canvas-body > .appear").count() > 0, true, "new content animates in");
   await emit({ type: "call", id: 5, agent: 7, lesson: 1, name: "search_material", input: { query: "voltage" } });
   await page.locator(".work .step").getByText("Searched the material for “voltage”").waitFor();
   await page.locator("#suggest").getByText("Start teaching").click();
