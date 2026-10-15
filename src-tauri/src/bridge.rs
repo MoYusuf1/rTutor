@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -39,6 +39,8 @@ next, then call next.";
 
 pub struct Bridge {
     s: Mutex<S>,
+    // ponytail: one condvar wakes every waiter on any change; fine for a handful of agents and calls, one per waiter
+    // if many agents ever run at once
     cv: Condvar,
     token: String,
 }
@@ -162,8 +164,11 @@ impl Bridge {
 
 fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<()> {
     let bridge = app.state::<Bridge>();
-    let mut lines = BufReader::new(stream.try_clone()?).lines();
-    let Some(Ok(first)) = lines.next() else { return Ok(()) };
+    // anything on this machine can connect: the first line (with the token) must come quickly and be of sane size
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut first = String::new();
+    BufReader::new((&stream).take(64 * 1024)).read_line(&mut first)?;
+    stream.set_read_timeout(None)?;
     let msg: Value = serde_json::from_str(&first).unwrap_or_default();
     if msg["token"].as_str() != Some(bridge.token.as_str()) {
         return Ok(()); // not ours (or a browser poking at the port)
@@ -191,7 +196,7 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
             id
         };
         writeln!(out, "{}", json!({ "id": id }))?;
-        for _ in lines.by_ref() {} // blocks until the agent exits
+        let _ = std::io::copy(&mut &out, &mut std::io::sink()); // blocks until the agent exits
         let mut s = bridge.lock();
         note(format!("agent #{id} disconnected"));
         s.agents.retain(|a| a.id != id);
@@ -281,7 +286,11 @@ impl S {
     /// Which agent a message goes to: the one running in its subject's folder, else (unless the message waits for
     /// its own) the active agent, which teaches any subject without one.
     fn owner(&self, item: &Item) -> Option<u64> {
-        self.agents.iter().find(|a| within(&a.cwd, &item.dir)).map(|a| a.id).or(if item.own { None } else { self.active })
+        // two agents in one subject: whichever is waiting takes it, so neither sits idle while the other is busy
+        let mut here = self.agents.iter().filter(|a| within(&a.cwd, &item.dir));
+        let first = here.next();
+        let waiting = first.filter(|a| a.waiting).or_else(|| here.find(|a| a.waiting));
+        waiting.or(first).map(|a| a.id).or(if item.own { None } else { self.active })
     }
     /// The first message waiting for `agent`.
     fn next_for(&self, agent: u64) -> Option<usize> {
@@ -365,30 +374,55 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     if lesson == 0 {
         return Err("No lesson yet. Call next to get the learner's first message.".into());
     }
+    s.seq += 1;
+    let id = s.seq;
+    let page = s.page.clone();
+    drop(s); // nothing below needs the bridge until the page is asked; the database is never read under its lock
     // the learner may have deleted the lesson while the agent was still on it
     let exists = app.state::<crate::Store>().db()?.query_row("SELECT 1 FROM lessons WHERE id = ?1", [lesson], |_| Ok(())).is_ok();
     if !exists {
         return Err("The learner deleted this lesson. Stop working on it and call next to wait for them.".into());
     }
-    let Some(page) = s.page.clone() else { return Err("The rTutor window isn't ready. Try again.".into()) };
-    s.seq += 1;
-    let id = s.seq;
+    // tools that only read or save data run right here, window or not; the page just hears what was done
+    if let Some(done) = crate::agent_tool(app, lesson, tool, input) {
+        let result = match done {
+            Ok(text) => json!({ "content": text }),
+            Err(text) => json!({ "content": text, "is_error": true }),
+        };
+        if let Some(page) = &page {
+            let _ = page.send(json!({ "type": "did", "lesson": lesson, "name": tool, "input": input, "ok": result["is_error"] != true }));
+        }
+        return finish(app, lesson, id, tool, input, result);
+    }
+    let Some(page) = page else { return Err("The rTutor window isn't ready. Try again.".into()) };
+    let mut s = bridge.lock();
     s.calls.insert(id, None);
     let _ = page.send(json!({ "type": "call", "id": id, "agent": agent, "lesson": lesson, "name": tool, "input": input }));
     let result = loop {
-        if let Some(r) = s.calls.get_mut(&id).map(Option::take) {
-            match r {
-                Some(r) => break r,
-                None => s = bridge.cv.wait(s).unwrap_or_else(|e| e.into_inner()),
+        match s.calls.get_mut(&id).map(Option::take) {
+            Some(Some(r)) => break r,
+            Some(None) => {
+                // the agent gave up on the call (its timeout, a cancel, it exited): stop waiting, and let the page know
+                // so an answer given later reaches the agent as the learner's next message instead of nowhere
+                if closed(stream) || !s.agents.iter().any(|a| a.id == agent) {
+                    s.calls.remove(&id);
+                    note(format!("agent #{agent} dropped its {tool} call"));
+                    let _ = page.send(json!({ "type": "dropped", "id": id }));
+                    return Err("The call was dropped.".into());
+                }
+                s = bridge.cv.wait_timeout(s, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
             }
-        } else {
-            return Err("The rTutor window reloaded. Call next.".into());
+            None => return Err("The rTutor window reloaded. Call next.".into()),
         }
     };
     s.calls.remove(&id);
     drop(s);
+    finish(app, lesson, id, tool, input, result)
+}
+
+/// Records a finished tool call in the lesson and gives the agent its answer.
+fn finish<R: Runtime>(app: &AppHandle<R>, lesson: i64, id: u64, tool: &str, input: &Value, mut result: Value) -> Result<(String, Delivery), String> {
     let use_id = format!("agent-{id}");
-    let mut result = result;
     result["type"] = json!("tool_result");
     result["tool_use_id"] = json!(use_id);
     // the agent has the material's text in its own context; the saved history needs only that it was read (a book
@@ -493,8 +527,11 @@ mod tests {
         }
         /// Starts a tool call; the reply is read from the returned stream.
         fn call(&self, tool: &str) -> TcpStream {
+            self.call_with(tool, json!({}))
+        }
+        fn call_with(&self, tool: &str, input: Value) -> TcpStream {
             let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-            writeln!(s, "{}", json!({ "token": self.token, "agent": self.id, "tool": tool, "input": {} })).unwrap();
+            writeln!(s, "{}", json!({ "token": self.token, "agent": self.id, "tool": tool, "input": input })).unwrap();
             s
         }
     }
@@ -544,6 +581,62 @@ mod tests {
         s.inbox.push_back(item("/home/me/rtutor/Physics", false));
         s.inbox.push_back(item("/home/me/rtutor/Somali", false));
         assert_eq!((s.next_for(1), s.next_for(2)), (Some(0), Some(1)));
+        // a second agent in the same subject: whichever is waiting gets the message
+        s.agents.push(agent(3, "/home/me/rtutor/Somali"));
+        s.agents[1].waiting = false;
+        assert_eq!(s.owner(&item("/home/me/rtutor/Somali", false)), Some(3), "the busy one doesn't hold it up");
+    }
+
+    #[test]
+    fn data_tools_run_without_the_window() {
+        let (app, dir) = app("data");
+        let agent = Agent::join(&dir);
+        send(&app, "Teach me greetings");
+        let _ = reply(agent.call("next"));
+        // the test app has no page at all: these still work
+        assert_eq!(reply(agent.call_with("phase", json!({ "phase": "teach" }))), "Phase: teach.");
+        assert_eq!(reply(agent.call_with("update_state", json!({ "markdown": "Knows salaan." }))), "Lesson state saved.");
+        let state: String = app.state::<crate::Store>().db().unwrap().query_row("SELECT state FROM lessons WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(state, "Knows salaan.");
+        assert!(reply(agent.call_with("phase", json!({ "phase": "nap" }))).contains("probe, plan, teach, review"));
+        assert!(reply(agent.call("quiz")).contains("window isn't ready"), "questions still need the window");
+    }
+
+    #[test]
+    fn a_question_the_agent_gives_up_on_stops_waiting() {
+        let (app, dir) = app("gave-up");
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<Value>::new()));
+        let log = seen.clone();
+        app.state::<Bridge>().lock().page = Some(Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(j) = body {
+                log.lock().unwrap().push(serde_json::from_str(&j).unwrap());
+            }
+            Ok(())
+        }));
+        let agent = Agent::join(&dir);
+        send(&app, "Quiz me");
+        let _ = reply(agent.call("next"));
+        let call = agent.call_with("quiz", json!({ "question": "Hello?", "options": ["Salaan", "Nabad"], "correct_index": 0 }));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(app.state::<Bridge>().lock().calls.len(), 1, "the page has the question");
+        call.shutdown(std::net::Shutdown::Both).unwrap(); // the agent's timeout ran out
+        let t = Instant::now();
+        while !app.state::<Bridge>().lock().calls.is_empty() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(app.state::<Bridge>().lock().calls.is_empty(), "the bridge stopped waiting");
+        assert!(seen.lock().unwrap().iter().any(|e| e["type"] == "dropped"), "and told the page, so a late answer isn't lost");
+    }
+
+    #[test]
+    fn a_connection_must_say_who_it_is_quickly_and_briefly() {
+        let (_app, dir) = app("limits");
+        let info: Value = serde_json::from_str(&std::fs::read_to_string(file(&dir)).unwrap()).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", info["port"].as_u64().unwrap() as u16)).unwrap();
+        let _ = s.write_all(&vec![b'x'; 100 * 1024]); // no newline, ever
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut buf = [0u8; 1];
+        assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "the bridge hung up instead of buffering forever");
     }
 
     #[test]

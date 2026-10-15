@@ -52,6 +52,21 @@ function invalid(name, input) {
 /** Runs one tool call for lesson `to` (default: the open one) and returns its tool_result. A question's result also
  *  carries `answer` (what the learner did), which the app keeps to replay the chat; it isn't sent to the tutor.
  *  `t`: the turn it came in ({ live: streamed canvas sections, invalid: unparsable inputs, truncated }). */
+/** A data tool an agent's call ran in Rust (no window needed): show the step, and what it changed. */
+export function didTool(name, input, to) {
+  const here = to === app.lesson;
+  const said = here && describe(name, input);
+  if (said) step(said);
+  if (name === "update_state" && typeof input.markdown === "string") {
+    to.state = input.markdown;
+    if (here) showNotes(input.markdown);
+  }
+  if (name === "phase" && PHASES[input.phase]) {
+    to.phase = input.phase;
+    if (here) renderSuggest();
+  }
+}
+
 export async function executeTool({ id, name, input = {} }, t, to = app.lesson) {
   const ok = (content) => ({ type: "tool_result", tool_use_id: id, content });
   const bad = (content) => ({ type: "tool_result", tool_use_id: id, content, is_error: true });

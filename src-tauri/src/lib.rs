@@ -796,6 +796,29 @@ fn material_search(store: State<Store>, lesson: i64, query: String) -> Res<Strin
         .join("\n\n"))
 }
 
+/// An agent's tool call that only reads or saves data, run without the window (None: the page runs it).
+pub(crate) fn agent_tool<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, tool: &str, input: &Value) -> Option<Res<String>> {
+    let store = app.state::<Store>();
+    let text = |k: &str| input[k].as_str().map(str::to_owned);
+    let num = |k: &str| input[k].as_i64().or_else(|| input[k].as_str()?.trim().parse().ok());
+    Some(match tool {
+        "search_material" => text("query").ok_or_else(|| "search_material needs a query.".to_owned()).and_then(|q| material_search(store, lesson, q)),
+        "read_material" => match (num("material"), num("part")) {
+            (Some(m), Some(p)) => material_read(store, lesson, m, p),
+            _ => Err("read_material needs a material number and a part number.".into()),
+        },
+        "update_state" => text("markdown").ok_or_else(|| "update_state needs a markdown string.".to_owned()).and_then(|m| set_state(store, lesson, m).map(|_| "Lesson state saved.".into())),
+        "subject_notes" => text("markdown")
+            .ok_or_else(|| "subject_notes needs a markdown string.".to_owned())
+            .and_then(|m| set_subject_notes(store, lesson, m).map(|_| "Subject notes saved. Every lesson in this subject will start from them.".into())),
+        "phase" => match input["phase"].as_str() {
+            Some(p @ ("probe" | "plan" | "teach" | "review")) => Ok(format!("Phase: {p}.")),
+            _ => Err("phase is one of probe, plan, teach, review.".into()),
+        },
+        _ => return None,
+    })
+}
+
 /// The tutor's `read_material` tool.
 #[tauri::command]
 fn material_read(store: State<Store>, lesson: i64, material: i64, part: i64) -> Res<String> {

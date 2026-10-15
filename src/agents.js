@@ -6,7 +6,7 @@ import { agentLook } from "./icons.js";
 import { app, saveSettings, short, subjectDir } from "./state.js";
 import { chatNode, note, refreshWork, say, step, thinking } from "./chat.js";
 import { openQuestion } from "./cards.js";
-import { executeTool } from "./tools.js";
+import { didTool, executeTool } from "./tools.js";
 import { renderStart } from "./start.js";
 import { setWorking } from "./composer.js";
 import { renderPop, showWho, openModel } from "./who.js";
@@ -195,6 +195,7 @@ export function useAgent(id) {
 }
 
 let agentShape = "";
+const dropped = new Set(); // calls the agent hung up on while the learner was still answering
 const events = new Channel();
 events.onmessage = async (e) => {
   if (e.type === "agents") {
@@ -213,6 +214,13 @@ events.onmessage = async (e) => {
     agentShape = shape;
     renderTabs();
     if (!$("#start").hidden) renderStart();
+  } else if (e.type === "did") {
+    agentLesson = e.lesson;
+    if (app.lesson?.id !== e.lesson) return;
+    if (!openQuestion()) thinking(true); // its steps show as they happen
+    if (e.ok) didTool(e.name, e.input ?? {}, app.lesson);
+  } else if (e.type === "dropped") {
+    dropped.add(e.id);
   } else if (e.type === "call") {
     const to = app.lesson?.id === e.lesson ? app.lesson : { id: e.lesson, sections: 1, state: "" };
     agentLesson = e.lesson;
@@ -222,6 +230,12 @@ events.onmessage = async (e) => {
       result = await executeTool({ id: `agent-${e.id}`, name: e.name, input: e.input ?? {} }, { live: new Map(), invalid: {}, truncated: false }, to);
     } catch (err) {
       result = { content: String(err), is_error: true };
+    }
+    if (dropped.delete(e.id)) {
+      // the agent stopped waiting for this answer (its time ran out, or it exited): the answer comes to it as the
+      // learner's next message instead of being lost
+      if (result.answer && !result.abandoned) invoke("agent_send", { lesson: e.lesson, text: `(My answer to your earlier question.) ${result.content}` }).catch(() => {});
+      return;
     }
     await invoke("agent_result", { id: e.id, result: { content: result.content, is_error: !!result.is_error } });
     // what the learner answered is kept with the call, so the chat can show it again when the lesson reopens

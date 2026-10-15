@@ -130,7 +130,7 @@ async function agentFlow(browser, engine) {
   const [first] = await page.evaluate(() => window.__state.sent);
   assert.ok(first.startsWith(long) && /test me/i.test(first), "the starting gear goes to the tutor");
   await emit({ type: "agents", agents: [{ id: 7, name: "claude-code", cwd: "/home/learner/rtutor", cmd: "", busy: true }], active: 7 });
-  await emit({ type: "call", id: 1, agent: 7, lesson: 1, name: "phase", input: { phase: "probe" } });
+  await emit({ type: "did", lesson: 1, name: "phase", input: { phase: "probe" }, ok: true }); // data tools run in Rust; the page hears of them
   await page.locator("#suggest").getByText("Start teaching").waitFor();
   assert.equal(await page.locator("#suggest .now").innerText(), "Probing");
   await emit({ type: "call", id: 2, agent: 7, lesson: 1, name: "quiz", input: { question: "What carries current?", options: ["Charge", "Voltage"], correct_index: 0, explanation: "Current is moving charge." } });
@@ -149,7 +149,7 @@ async function agentFlow(browser, engine) {
   await emit({ type: "call", id: 4, agent: 7, lesson: 1, name: "write_lesson", input: { markdown: "# Voltage\nPush per charge." } });
   await page.locator("#canvas-body").getByText("Push per charge.").waitFor();
   assert.equal(await page.locator("#canvas-body > .appear").count() > 0, true, "new content animates in");
-  await emit({ type: "call", id: 5, agent: 7, lesson: 1, name: "search_material", input: { query: "voltage" } });
+  await emit({ type: "did", lesson: 1, name: "search_material", input: { query: "voltage" }, ok: true });
   await page.locator(".work .step").getByText("Searched the material for “voltage”").waitFor();
   await page.locator("#suggest").getByText("Start teaching").click();
   await page.waitForFunction(() => window.__state.sent.length === 2);
@@ -171,6 +171,12 @@ async function agentFlow(browser, engine) {
   const judged = (await page.evaluate(() => window.__state.results[21])).content;
   assert.ok(judged.includes('"moving charges"') && judged.includes("Judge it yourself"), judged);
   await page.locator("#canvas-body").getByText("A good answer:").waitFor();
+  // the agent stops waiting while a question is still open: the answer reaches it as the learner's next message
+  await emit({ type: "call", id: 30, agent: 7, lesson: 1, name: "ask", input: { question: "Next?", options: ["Ohm's law", "Power"] } });
+  await emit({ type: "dropped", id: 30 });
+  await page.locator(".card .opt", { hasText: "Power" }).click();
+  await page.waitForFunction(() => window.__state.sent.some((t) => t.includes("My answer to your earlier question") && t.includes("Power")));
+  assert.ok(!(await page.evaluate(() => window.__state.results[30])), "no answer to a call that's gone");
   // an answered question settles: no box or Check button left, the answer stays as text
   assert.equal(await page.locator(".card.short input, .card.short button").count(), 0, "nothing left to check");
   await page.locator(".card.short.answered .given").getByText("moving charges").waitFor();
