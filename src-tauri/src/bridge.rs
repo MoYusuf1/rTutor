@@ -552,7 +552,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let c = crate::db::open(&dir.join("test.db")).unwrap();
         c.execute_batch("INSERT INTO folders (id, name) VALUES (1, 'Somali'); INSERT INTO lessons (id, folder_id, title, updated) VALUES (1, 1, 'Greetings', 0);").unwrap();
-        app.manage(crate::Store { db: Mutex::new(c), open: Mutex::default(), http: crate::http_client(), stops: Mutex::default(), extracted: Mutex::default() });
+        app.manage(crate::Store::new(c, &dir.join("test.db")).unwrap());
         app.manage(Bridge::start(app.handle(), &dir).unwrap());
         (app, dir)
     }

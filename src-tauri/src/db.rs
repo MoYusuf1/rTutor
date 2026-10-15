@@ -25,9 +25,13 @@ CREATE TABLE IF NOT EXISTS tool_results (
 CREATE TABLE IF NOT EXISTS sections (
   id INTEGER PRIMARY KEY, lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE, markdown TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS sections_by_lesson ON sections(lesson_id, id);
+CREATE INDEX IF NOT EXISTS lessons_by_folder ON lessons(folder_id);
+CREATE INDEX IF NOT EXISTS folders_by_parent ON folders(parent_id);
 CREATE TABLE IF NOT EXISTS sources (
   id INTEGER PRIMARY KEY, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
   lesson_id INTEGER REFERENCES lessons(id) ON DELETE CASCADE, name TEXT NOT NULL, body TEXT NOT NULL, words INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sources_by_folder ON sources(folder_id);
+CREATE INDEX IF NOT EXISTS sources_by_lesson ON sources(lesson_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS turns (
   id INTEGER PRIMARY KEY, lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
@@ -57,6 +61,7 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     c.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
     c.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&c)?;
+    phases(&c)?;
     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;")?;
     Ok(c)
 }
@@ -102,6 +107,30 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     add_lesson_columns(c)?;
     subjects(c)?;
     slim(c)
+}
+
+/// Version 5: each lesson keeps the phase the tutor last reported, instead of it being searched for in the history.
+fn phases(c: &Connection) -> rusqlite::Result<()> {
+    if c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? >= 5 {
+        return Ok(());
+    }
+    let tx = c.unchecked_transaction()?;
+    let ids: Vec<i64> = tx.prepare("SELECT id FROM lessons")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    for id in ids {
+        let body: Option<String> = tx
+            .query_row("SELECT body FROM messages WHERE lesson_id = ?1 AND instr(body, '\"name\":\"phase\"') > 0 ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0))
+            .optional()?;
+        if let Some(phase) = body.and_then(|b| serde_json::from_str(&b).ok()).and_then(|m: Value| phase_in(&m)) {
+            tx.execute("UPDATE lessons SET phase = ?2 WHERE id = ?1", params![id, phase])?;
+        }
+    }
+    tx.pragma_update(None, "user_version", 5)?;
+    tx.commit()
+}
+
+/// The phase a message's tool calls move the lesson to, if any (the last one wins).
+fn phase_in(msg: &Value) -> Option<String> {
+    msg["content"].as_array()?.iter().rev().find(|b| b["type"] == "tool_use" && b["name"] == "phase")?["input"]["phase"].as_str().map(str::to_owned)
 }
 
 /// Version 4: material is kept once, as its parts; the copy in `sources.body` goes, and the space it
@@ -209,24 +238,10 @@ pub fn tool_ids(messages: &[(i64, Value)]) -> Vec<&str> {
         .collect()
 }
 
-/// The phase the tutor last reported: one indexed lookup of the newest message that mentions it, not a history scan.
+/// The phase the tutor last reported (kept on the lesson as its calls are saved).
 pub fn last_phase(c: &Connection, lesson: i64) -> Res<Value> {
-    let body: Option<String> = c
-        .query_row(
-            "SELECT body FROM messages WHERE lesson_id = ?1 AND instr(body, '\"name\":\"phase\"') > 0 ORDER BY seq DESC LIMIT 1",
-            [lesson],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(err)?;
-    let m: Value = body.and_then(|b| serde_json::from_str(&b).ok()).unwrap_or_default();
-    Ok(m["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .rev()
-        .find(|b| b["type"] == "tool_use" && b["name"] == "phase")
-        .map_or(Value::Null, |b| b["input"]["phase"].clone()))
+    let phase: String = c.query_row("SELECT phase FROM lessons WHERE id = ?1", [lesson], |r| r.get(0)).map_err(err)?;
+    Ok(if phase.is_empty() { Value::Null } else { Value::String(phase) })
 }
 
 /// The lesson's first message (how it began: its gear), and its first section (whether it titles the lesson).
@@ -252,6 +267,7 @@ fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
         ("sources", "file", "TEXT NOT NULL DEFAULT ''"),
         ("folders", "notes", "TEXT NOT NULL DEFAULT ''"),
         ("lessons", "dir", "TEXT NOT NULL DEFAULT ''"),
+        ("lessons", "phase", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (table, col, decl) in added {
         let has: i64 = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [col], |r| r.get(0))?;
@@ -325,7 +341,10 @@ pub fn messages(c: &Connection, lesson: i64) -> Res<Vec<(Value, usize)>> {
 pub fn append_message(c: &Connection, lesson: i64, seq: usize, msg: &Value) -> Res<usize> {
     let body = msg.to_string();
     exec(c, "INSERT INTO messages (lesson_id, seq, body) VALUES (?1, ?2, ?3)", params![lesson, seq as i64, body])?;
-    exec(c, "UPDATE lessons SET updated = ?2 WHERE id = ?1", params![lesson, now()])?;
+    match phase_in(msg) {
+        Some(phase) => exec(c, "UPDATE lessons SET updated = ?2, phase = ?3 WHERE id = ?1", params![lesson, now(), phase])?,
+        None => exec(c, "UPDATE lessons SET updated = ?2 WHERE id = ?1", params![lesson, now()])?,
+    };
     Ok(body.len())
 }
 
@@ -565,6 +584,22 @@ mod tests {
         .unwrap();
         let names: Vec<String> = sources_for(&c, 1).unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["top", "mid", "own"]);
+    }
+
+    #[test]
+    fn lessons_from_before_version_5_get_their_phase() {
+        let path = std::env::temp_dir().join(format!("rtutor-phase-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = open(&path).unwrap();
+            c.execute("INSERT INTO lessons (id, title, updated) VALUES (1, 'Old', 0)", []).unwrap();
+            let m = json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "p", "name": "phase", "input": { "phase": "review" } }] });
+            c.execute("INSERT INTO messages VALUES (1, 0, ?1)", [m.to_string()]).unwrap(); // saved before the column was
+            c.execute_batch("PRAGMA user_version = 4;").unwrap();
+        }
+        let c = open(&path).unwrap();
+        assert_eq!(last_phase(&c, 1).unwrap(), "review");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -41,6 +41,7 @@ if (!["agent", "api"].includes(s.active)) s.active = "agent"; // older settings 
 if (!PRESETS[s.api]) s.api = "nvidia";
 if (s.main && !s.main.kind) s.main.kind = kindOf(s.main.cmd); // older settings named a command
 await listenToAgents();
+invoke("forget_source", {}).catch(() => {}); // files read before a reload and never added
 // the timer reads its lengths from the settings just loaded
 startTimer({
   get: () => s.pomo,

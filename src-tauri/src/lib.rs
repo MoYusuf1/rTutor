@@ -17,12 +17,14 @@ const PROMPT: &str = include_str!("../prompts/teach.md");
 
 struct Store {
     db: Mutex<Connection>,
+    // a second, read-only connection: opening lessons, paging and searching (the tutor's too) don't wait behind writes
+    reader: Mutex<Connection>,
     open: Mutex<Opens>,
     http: reqwest::Client, // one pooled client: connections are reused across turns
     stops: Mutex<std::collections::HashMap<i64, futures_util::future::AbortHandle>>, // running API turns, by lesson
     // material read from files, waiting to be added: the page holds only a token, never the text (a book is
     // megabytes, and would otherwise cross to the page and back)
-    extracted: Mutex<std::collections::HashMap<u64, (String, String)>>,
+    extracted: Mutex<std::collections::HashMap<u64, (String, String, std::time::Instant)>>,
 }
 
 /// The lesson currently being taught, kept in memory so each turn only appends.
@@ -101,8 +103,15 @@ fn http_client() -> reqwest::Client {
 }
 
 impl Store {
+    fn new(db: Connection, path: &std::path::Path) -> Res<Store> {
+        let reader = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(err)?;
+        Ok(Store { db: Mutex::new(db), reader: Mutex::new(reader), open: Mutex::default(), http: http_client(), stops: Mutex::default(), extracted: Mutex::default() })
+    }
     fn db(&self) -> Res<std::sync::MutexGuard<'_, Connection>> {
         self.db.lock().map_err(err)
+    }
+    fn reader(&self) -> Res<std::sync::MutexGuard<'_, Connection>> {
+        self.reader.lock().map_err(err)
     }
     /// Sources changed or a lesson was deleted: rebuild the prompt / history on next use.
     fn forget(&self, lesson: Option<i64>) {
@@ -446,7 +455,7 @@ async fn send(
 
 #[tauri::command]
 fn tree(store: State<Store>) -> Res<Value> {
-    let mut t = db::tree(&*store.db()?)?;
+    let mut t = db::tree(&*store.reader()?)?;
     // each subject's folder on disk: where its agent runs
     for f in t["folders"].as_array_mut().into_iter().flatten() {
         if f["parent"].is_null() {
@@ -484,7 +493,7 @@ fn mirror_lesson(c: &Connection, lesson: i64) -> Res<()> {
 fn get_lesson(store: State<Store>, id: i64) -> Res<Value> {
     // Opening a lesson reads a page of it, never all of it: the newest messages and sections, what they need, and
     // the few facts the page would otherwise scan the history for. Older pages come as the learner scrolls up.
-    let c = store.db()?;
+    let c = store.reader()?;
     let (title, folder, state): (String, Option<i64>, String) = c
         .query_row("SELECT title, folder_id, state FROM lessons WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .map_err(err)?;
@@ -511,7 +520,7 @@ const SECTIONS_PAGE: usize = 40;
 /// The page of chat history before message `before` (a seq), oldest first, with its saved answers.
 #[tauri::command]
 fn lesson_history(store: State<Store>, id: i64, before: i64) -> Res<Value> {
-    let c = store.db()?;
+    let c = store.reader()?;
     let page = db::messages_page(&c, id, Some(before), HISTORY_PAGE)?;
     Ok(json!({
         "messages": page.iter().map(|(_, m)| m).collect::<Vec<_>>(),
@@ -523,7 +532,7 @@ fn lesson_history(store: State<Store>, id: i64, before: i64) -> Res<Value> {
 /// The page of canvas sections before section `before`, oldest first.
 #[tauri::command]
 fn lesson_sections(store: State<Store>, id: i64, before: i64) -> Res<Value> {
-    let page = db::sections_page(&*store.db()?, id, Some(before), SECTIONS_PAGE)?;
+    let page = db::sections_page(&*store.reader()?, id, Some(before), SECTIONS_PAGE)?;
     Ok(json!({
         "sections": page.iter().map(|(_, s)| s).collect::<Vec<_>>(),
         "before": page.first().map(|(i, _)| *i),
@@ -599,7 +608,7 @@ fn delete_lesson(store: State<Store>, id: i64) -> Res<()> {
 
 #[tauri::command]
 fn search(store: State<Store>, query: String) -> Res<Vec<Value>> {
-    db::search(&*store.db()?, &query)
+    db::search(&*store.reader()?, &query)
 }
 
 /// Saves the lesson as Markdown. The path comes from the native save dialog, never from the page.
@@ -700,14 +709,32 @@ fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) ->
 /// word count: the text itself never leaves Rust.
 fn read_material(app: &tauri::AppHandle, path: std::path::PathBuf) -> Res<Value> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    const MAX_BYTES: u64 = 200 * 1024 * 1024;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let text = material::extract(&path)?;
+    if std::fs::metadata(&path).map_err(err)?.len() > MAX_BYTES {
+        return Err(format!("{name} is over 200 MB. Split it into smaller files, or add the chapters you need."));
+    }
+    // a damaged file can make the PDF reader panic or spin: it gets a minute, on its own thread
+    // ponytail: a reader that spins keeps its thread until the app quits; a child process could be killed instead
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::panic::catch_unwind(|| material::extract(&p)));
+    });
+    let text = match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(Ok(text)) => text?,
+        Ok(Err(_)) => return Err(format!("Couldn't read {name}: the file looks damaged.")),
+        Err(_) => return Err(format!("Reading {name} took over a minute, so it was stopped. Is it a very large scan?")),
+    };
     if text.is_empty() {
         return Err(format!("No text found in {name}. Scanned PDFs need OCR first."));
     }
     let words = text.split_whitespace().count();
     let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    app.state::<Store>().extracted.lock().map_err(err)?.insert(token, (name.clone(), text));
+    let store = app.state::<Store>();
+    let mut held = store.extracted.lock().map_err(err)?;
+    held.retain(|_, (_, _, at)| at.elapsed() < std::time::Duration::from_secs(60 * 60)); // read an hour ago and never added
+    held.insert(token, (name.clone(), text, std::time::Instant::now()));
     Ok(json!({ "token": token, "name": name, "words": words }))
 }
 
@@ -727,11 +754,15 @@ async fn read_source(app: tauri::AppHandle, path: String) -> Res<Value> {
     tauri::async_runtime::spawn_blocking(move || read_material(&app, path.into())).await.map_err(err)?
 }
 
-/// Material read but not added after all (its chip was removed): its text is let go.
+/// Material read but not added after all (its chip was removed): its text is let go. No token (the page loaded
+/// afresh, so nothing it held is wanted): all of it.
 #[tauri::command]
-fn forget_source(store: State<Store>, token: u64) {
+fn forget_source(store: State<Store>, token: Option<u64>) {
     if let Ok(mut m) = store.extracted.lock() {
-        m.remove(&token);
+        match token {
+            Some(t) => drop(m.remove(&t)),
+            None => m.clear(),
+        }
     }
 }
 
@@ -742,18 +773,23 @@ async fn add_source(app: tauri::AppHandle, folder: Option<i64>, lesson: Option<i
     // (the tutor's tool calls, the chat), and off the main thread
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<Store>();
-        let (name, text) = store.extracted.lock().map_err(err)?.remove(&token).ok_or("That file was already added, or read too long ago. Add it again.")?;
-        let subject = {
-            let c = store.db()?;
+        let (name, text, _) = store.extracted.lock().map_err(err)?.remove(&token).ok_or("That file was already added, or read too long ago. Add it again.")?;
+        // the same file twice (by name, ignoring case and extension) isn't added again
+        let twin = |c: &Connection| -> Res<()> {
             let twin: Option<String> = c
                 .prepare_cached("SELECT name FROM sources WHERE folder_id IS ?1 AND lesson_id IS ?2")
                 .and_then(|mut q| q.query_map(params![folder, lesson], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
                 .map_err(err)?
                 .into_iter()
                 .find(|n| material::stem(n) == material::stem(&name));
-            if let Some(twin) = twin {
-                return Err(format!("{name} looks like {twin}, which is already here, so it wasn't added again."));
+            match twin {
+                Some(twin) => Err(format!("{name} looks like {twin}, which is already here, so it wasn't added again.")),
+                None => Ok(()),
             }
+        };
+        let subject = {
+            let c = store.db()?;
+            twin(&c)?;
             let home: Option<i64> = match (folder, lesson) {
                 (Some(f), _) => Some(f),
                 (None, Some(l)) => c.query_row("SELECT folder_id FROM lessons WHERE id = ?1", [l], |r| r.get(0)).map_err(err)?,
@@ -768,6 +804,7 @@ async fn add_source(app: tauri::AppHandle, folder: Option<i64>, lesson: Option<i
         drop(text);
         let c = store.db()?;
         let tx = c.unchecked_transaction().map_err(err)?;
+        twin(&tx)?; // again: the same file may have been dropped twice at once, and the lock was let go above
         // the text is kept once, as searchable parts (plus the Markdown file); `body` stays empty
         exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, '', ?4, ?5)", params![folder, lesson, name, words, file])?;
         let id = tx.last_insert_rowid();
@@ -808,7 +845,7 @@ fn delete_source(store: State<Store>, id: i64) -> Res<()> {
 /// The tutor's `search_material` tool.
 #[tauri::command]
 fn material_search(store: State<Store>, lesson: i64, query: String) -> Res<String> {
-    let hits = db::search_parts(&*store.db()?, lesson, &query)?;
+    let hits = db::search_parts(&*store.reader()?, lesson, &query)?;
     if hits.is_empty() {
         return Ok("Nothing in the material matches. Try other words, or read the parts listed in its contents.".into());
     }
@@ -845,7 +882,7 @@ pub(crate) fn agent_tool<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i
 /// The tutor's `read_material` tool.
 #[tauri::command]
 fn material_read(store: State<Store>, lesson: i64, material: i64, part: i64) -> Res<String> {
-    match db::read_part(&*store.db()?, lesson, material, part)? {
+    match db::read_part(&*store.reader()?, lesson, material, part)? {
         Some((name, label, body, total)) => Ok(format!("\"{name}\", part {part} of {total} ({label}):\n\n{body}")),
         None => Err(format!("This lesson has no material {material} with a part {part}.")),
     }
@@ -937,7 +974,7 @@ pub fn run() {
             for id in pending {
                 let _ = mirror_lesson(&c, id);
             }
-            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: http_client(), stops: Mutex::default(), extracted: Mutex::default() });
+            app.manage(Store::new(c, &dir.join("rtutor.db"))?);
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())
         })
