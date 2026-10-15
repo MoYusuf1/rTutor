@@ -211,6 +211,7 @@ async function agentFlow(browser, engine) {
 async function historyFlow(browser, engine) {
   const page = await browser.newPage();
   page.setDefaultTimeout(10000);
+  if (process.env.UI_SLOW && engine === "chromium") await (await page.context().newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.UI_SLOW) });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
