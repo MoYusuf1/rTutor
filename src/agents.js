@@ -10,6 +10,7 @@ import { executeTool } from "./tools.js";
 import { renderStart } from "./start.js";
 import { setWorking } from "./composer.js";
 import { renderPop, showWho, openModel } from "./who.js";
+import { sendToApi } from "./api.js";
 import { closeTab, installed, newTab, quickStarts, renderTabs, selectTab, setDrawer, startAt, tabs } from "./terminal.js";
 
 export let agents = []; // [{ id, name, cwd, cmd, busy, waiting }]
@@ -103,7 +104,7 @@ function needTutor() {
 
 export async function sendToAgent(text, shown) {
   const l = app.lesson;
-  if (sentWaiting && lastSent === text) return; // already waiting to be picked up
+  if (sentWaiting && lastSent === text) return note("Already sent. It goes out as soon as the tutor picks it up."); // not twice
   lastSent = text;
   say(shown, "user");
   sentWaiting = true;
@@ -133,7 +134,7 @@ const NUDGE = "Call the rTutor next tool now and keep tutoring through rTutor's 
 
 export async function stopAgent() {
   sentWaiting = false;
-  await invoke("agent_stop", { id: agentFor()?.id ?? null }).catch(() => {});
+  await invoke("agent_stop", { id: agentFor()?.id ?? null, lesson: app.lesson?.id ?? null }).catch(() => {});
   // interrupt it right away (Esc stops Claude Code and Codex mid-thought), then send it back to listening
   const tab = agentTab();
   if (tab) {
@@ -153,6 +154,33 @@ export async function restartAgent(a, kind) {
   closeTab(tab);
   await newTab(tab.cwd, cmd);
   if (app.lesson) note(`Switching ${label}'s model. It picks up from its notes.`);
+}
+
+/** A subject was renamed, so its folder moved: its agent, running in the old folder, restarts in the new one. */
+export async function subjectMoved(from, to) {
+  for (const tab of tabs.filter((t) => within(t.cwd, from))) {
+    const a = agents.find((x) => x.cwd === tab.cwd);
+    const kind = a && { claude: "claude", openai: "codex" }[agentLook(a.name).logo];
+    closeTab(tab);
+    if (kind) {
+      starting.set(to, { label: quickStarts()[kind][0], since: Date.now() });
+      await newTab(to, quickStarts()[kind][2]);
+    }
+  }
+}
+
+/** A subject was deleted: its agent stops (its folder is gone). */
+export function subjectGone(dir) {
+  for (const tab of tabs.filter((t) => within(t.cwd, dir))) closeTab(tab);
+  starting.delete(dir);
+}
+
+/** The learner switched to an API provider while a message waited for an agent: it goes to the API instead. */
+export async function handOverToApi() {
+  if (!sentWaiting || !app.lesson || agentLesson !== app.lesson.id) return;
+  sentWaiting = false;
+  await invoke("agent_stop", { id: null, lesson: app.lesson.id }).catch(() => {});
+  sendToApi(lastSent, null);
 }
 
 /** Reopening the lesson the agent is working on: show that it still is. */

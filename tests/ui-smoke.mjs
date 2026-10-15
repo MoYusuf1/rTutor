@@ -230,7 +230,13 @@ async function historyFlow(browser, engine) {
         switch (command) {
           case "get_settings": return { active: "agent", providers: {} };
           case "tree": return { folders: [{ id: 1, parent: null, name: "Somali", dir: "" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }, { id: 2, folder: 1, title: "Long" }], sources: [] };
-          case "get_lesson": return structuredClone(lessons[args.id]);
+          case "get_lesson": {
+            // like the app: only the newest page of a long chat comes with the lesson
+            const l = structuredClone(lessons[args.id]);
+            const from = Math.max(0, l.messages.length - 120);
+            return { ...l, messages: l.messages.slice(from), older: from };
+          }
+          case "lesson_history": return lessons[args.id].messages.slice(Math.max(0, args.before - 120), args.before);
           case "mcp_command": return { bin: "/opt/rtutor", home: "/home/me" };
           case "installed_agents": return ["claude"];
           case "log_listen": return ["/tmp/rtutor.log", []];
@@ -267,8 +273,21 @@ async function historyFlow(browser, engine) {
   const parts = () => page.locator("#canvas-body > .md").count();
   assert.ok((await parts()) <= 20, `only the newest sections render at first (${await parts()})`);
   assert.ok((await page.locator("#log .msg").count()) <= 40, "only the newest messages render at first");
+  // the chat opens on, and stays on, its newest message
+  const gap = () => page.locator("#log").evaluate((l) => l.scrollHeight - l.scrollTop - l.clientHeight);
+  await page.waitForFunction(() => { const l = document.querySelector("#log"); return l.scrollHeight - l.scrollTop - l.clientHeight < 4; });
+  await page.evaluate(() => { const d = document.createElement("div"); d.className = "msg bot"; d.style.height = "300px"; d.textContent = "new"; document.querySelector("#log").append(d); });
+  await page.waitForTimeout(100);
+  { const g = await gap(); assert.ok(g < 4, `something new keeps the chat at its end (${g}px short)`); }
   await page.locator("#canvas").evaluate((c) => (c.scrollTop = 0));
   await page.waitForFunction(() => document.querySelectorAll("#canvas-body > .md").length > 20);
+  // scrolling the chat up fetches older pages of history until the very first message
+  for (let tries = 0; tries < 40 && !(await page.locator("#log .msg").getByText("message 1", { exact: true }).count()); tries++) {
+    await page.locator("#log").evaluate((l) => (l.scrollTop = 0));
+    await page.waitForTimeout(100);
+  }
+  await page.locator("#log .msg").getByText("message 1", { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => window.__calls.filter((c) => c === "lesson_history").length >= 2), "older history came a page at a time");
   // no tutor running: the chat says so and offers to start one, instead of a pretend "Thinking…"
   await page.locator("#tree .row.folder .label").click();
   await page.locator("#start-input").fill("Numbers");

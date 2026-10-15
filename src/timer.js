@@ -47,8 +47,13 @@ function pomoToggle() {
   renderPomo(true);
 }
 
-/** The button by Sources, and the panel when it's open. `full` redraws the panel too (not just its clock). */
+let ticking = 0;
+
+/** The button by Sources, and the panel when it's open. `full` redraws the panel too (not just its clock).
+ *  It ticks only while a session runs: an idle or paused timer costs nothing. */
 export function renderPomo(full = false) {
+  clearTimeout(ticking);
+  if (pomo.ends) ticking = setTimeout(renderPomo, 1000 - (Date.now() % 1000) + 5); // on the second, as the clock shows
   const left = pomoLeft();
   const running = pomo.ends > 0;
   const started = running || pomo.left != null;
@@ -175,6 +180,5 @@ addEventListener("click", (e) => { if (!clickedIn(e, "pomo-pop", "pomo")) $("#po
 /** Starts the clock once the app's settings are loaded. */
 export function startTimer(hooks) {
   app = hooks;
-  setInterval(renderPomo, 1000);
   renderPomo();
 }

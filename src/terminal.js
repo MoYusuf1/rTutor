@@ -159,7 +159,7 @@ export async function newTab(cwd, run) {
   const css = getComputedStyle(document.documentElement);
   const v = (name) => css.getPropertyValue(name).trim();
   const term = new Terminal({
-    fontFamily: 'ui-monospace, "JetBrains Mono", monospace', fontSize: 13, cursorBlink: true, scrollback: 5000, cols: 100, rows: 24,
+    fontFamily: 'ui-monospace, "JetBrains Mono", monospace', fontSize: 13, cursorBlink: true, scrollback: 2000, // per tab, and each subject can have one cols: 100, rows: 24,
     theme: { background: v("--sidebar"), foreground: v("--text"), cursor: v("--accent"), selectionBackground: v("--accent-soft") },
   });
   const fit = new FitAddon();

@@ -229,8 +229,10 @@ fn set_subject_notes(store: State<Store>, lesson: i64, markdown: String) -> Res<
 fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<String> {
     let store = app.state::<Store>();
     let c = store.db()?;
-    let l = db::lesson(&c, lesson)?;
-    let mut s = format!("# Lesson: {}\n\n", l["title"].as_str().unwrap_or_default());
+    let (title, state, count): (String, String, i64) = c
+        .query_row("SELECT title, state, (SELECT COUNT(*) FROM sections WHERE lesson_id = ?1) FROM lessons WHERE id = ?1", [lesson], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(err)?;
+    let mut s = format!("# Lesson: {title}\n\n");
     if let Some(dir) = lesson_dir(&c, lesson)? {
         s.push_str(&format!(
             "Its folder is {} (lesson.md is the canvas so far, notes.md your lesson notes). rTutor keeps these files; \
@@ -238,17 +240,20 @@ fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<Strin
             dir.display()
         ));
     }
-    let sections: Vec<&str> = l["sections"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let state = l["state"].as_str().unwrap_or_default();
-    if sections.is_empty() {
+    if count == 0 {
         s.push_str("A new lesson: start with the probe.\n");
     } else {
         s.push_str("This lesson is already under way. Continue exactly where it left off; don't restart the probe or the plan.\n\n");
         if !state.is_empty() {
             s.push_str(&format!("Your lesson state:\n\n{state}\n\n"));
         }
-        let from = sections.len().saturating_sub(3);
-        s.push_str(&format!("The latest of the canvas's {} sections:\n\n{}\n", sections.len(), sections[from..].join("\n\n---\n\n")));
+        // only the newest three, read straight from the table: a long canvas costs the same as a short one
+        let mut last: Vec<String> = c
+            .prepare_cached("SELECT markdown FROM sections WHERE lesson_id = ?1 ORDER BY id DESC LIMIT 3")
+            .and_then(|mut q| q.query_map([lesson], |r| r.get(0))?.collect())
+            .map_err(err)?;
+        last.reverse();
+        s.push_str(&format!("The latest of the canvas's {count} sections:\n\n{}\n", last.join("\n\n---\n\n")));
     }
     s.push_str(&material(&c, lesson)?);
     s.push_str("\n---\n\n");
@@ -416,10 +421,41 @@ fn get_lesson(store: State<Store>, id: i64) -> Res<Value> {
     let c = store.db()?;
     let mut lesson = db::lesson(&c, id)?;
     let open = Open::load(id, db::messages(&c, id)?);
-    lesson["messages"] = json!(*open.messages);
+    let all = &open.messages;
+    // only the newest page goes to the page; older ones come from lesson_history as the learner scrolls up
+    let from = all.len().saturating_sub(HISTORY_PAGE);
+    lesson["messages"] = json!(all[from..]);
+    lesson["older"] = json!(from);
+    // what the page would otherwise read the whole history for: the latest phase and how the lesson began
+    lesson["phase"] = all
+        .iter()
+        .rev()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten().rev())
+        .find(|b| b["type"] == "tool_use" && b["name"] == "phase")
+        .map_or(Value::Null, |b| b["input"]["phase"].clone());
+    lesson["opener"] = all.first().map_or(Value::Null, |m| m["content"].clone());
     lesson["toolResults"] = db::tool_results(&c, id)?;
     *store.open.lock().map_err(err)? = open;
     Ok(lesson)
+}
+
+/// Messages per page of a lesson's chat history.
+const HISTORY_PAGE: usize = 120;
+
+/// The page of history just before `before` (an index into the lesson's messages), oldest first.
+#[tauri::command]
+fn lesson_history(store: State<Store>, id: i64, before: usize) -> Res<Value> {
+    let o = store.open.lock().map_err(err)?;
+    let page = |all: &[Value]| {
+        let end = before.min(all.len());
+        json!(all[end.saturating_sub(HISTORY_PAGE)..end])
+    };
+    if o.lesson == id {
+        return Ok(page(&o.messages));
+    }
+    drop(o);
+    let all: Vec<Value> = db::messages(&*store.db()?, id)?.into_iter().map(|(m, _)| m).collect();
+    Ok(page(&all))
 }
 
 #[tauri::command]
@@ -763,7 +799,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            send, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
+            send, lesson_history, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
             get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command, pty::installed_agents, pty::agent_models,

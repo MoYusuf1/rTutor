@@ -6,6 +6,36 @@ export const log = () => $("#log");
 
 let into = null; // a fragment replayed history is built into, out of the page
 
+// The chat sticks to its bottom: while the learner is at (or near) the end, anything that changes the chat's
+// height (a message, a card, the Thinking block growing, a diagram rendering) keeps the end in view. Scrolling
+// up to read releases it; scrolling back down, or sending a message, sticks it again.
+let stuck = true;
+let pinnedAt = -1; // where the app last put it: a scroll event reporting that is the app's own, not the learner's
+const pin = () => {
+  if (!stuck) return;
+  log().scrollTop = log().scrollHeight;
+  pinnedAt = log().scrollTop;
+};
+log().addEventListener("scroll", () => {
+  const l = log();
+  // scroll events arrive a frame late: the one for a pin can land after more was appended, and would look like
+  // the learner scrolling up. Only a position the app didn't set can release the chat.
+  if (l.scrollTop === pinnedAt) return;
+  stuck = l.scrollHeight - l.scrollTop - l.clientHeight < 60;
+}, { passive: true });
+let pinQueued = false; // many changes in one frame (a streaming reply) pin once
+new MutationObserver(() => {
+  if (pinQueued) return;
+  pinQueued = true;
+  requestAnimationFrame(() => { pinQueued = false; pin(); });
+}).observe(log(), { childList: true, subtree: true, characterData: true });
+log().addEventListener("toggle", () => requestAnimationFrame(pin), true); // a Thinking block opening or folding
+/** Back to the newest message (sending, or opening a lesson). */
+export function toBottom() {
+  stuck = true;
+  pin();
+}
+
 /** Runs `fn` with everything it adds to the chat going into `frag` instead, without animation. */
 export function renderInto(frag, fn) {
   into = frag;
@@ -27,15 +57,21 @@ export function chatNode(node) {
   if (into) return into.appendChild(node);
   if (work) thinking(false);
   log().append(node);
-  requestAnimationFrame(() => log().scrollTo({ top: log().scrollHeight, behavior: "smooth" }));
-  return node;
+  return node; // the chat stays at its end on its own (see `stuck`)
 }
 
 export function say(text, who = "bot") {
+  if (who === "user" && !into) stuck = true; // sending a message always brings the chat to its end
   chatNode(el("div", `msg ${who}${into ? "" : " appear"}`)).append(md(text));
 }
 
 export const note = (text) => chatNode(el("div", "meta", text));
+
+/** A note from outside the tutor's turn (the timer): it goes above an open "Thinking…" block instead of ending it. */
+export function aside(text) {
+  if (!work || into) return note(text);
+  log().insertBefore(el("div", "meta", text), work.node);
+}
 
 /** A node whose markdown re-renders at most once per frame while text streams in. */
 export function liveMarkdown(parent) {
@@ -44,18 +80,23 @@ export function liveMarkdown(parent) {
   let src = "";
   let queued = false;
   let done = false; // once final, a frame still queued from streaming must not overwrite it
+  let last = 0;
   return {
     box,
     set(text) {
       src = text;
       if (queued || done) return;
       queued = true;
-      requestAnimationFrame(() => {
+      // each render parses the whole text so far, so a long reply renders less often: every frame while short,
+      // then about every length/16 ms (a 4,000-character reply every 250 ms). The stream stays O(n), not O(n²).
+      const wait = Math.max(0, Math.min(src.length / 16, 400) - (performance.now() - last));
+      setTimeout(() => requestAnimationFrame(() => {
         queued = false;
         if (done) return;
+        last = performance.now();
         box.replaceChildren(md(src, false));
         follow(box);
-      });
+      }), wait);
     },
     finish(text = src) {
       done = true;
@@ -111,7 +152,6 @@ class Work {
     node.append(summary, el("div", "work-body"));
     node.dataset.started = Date.now();
     log().append(node);
-    log().scrollTop = log().scrollHeight;
     return new Work(node, false);
   }
 

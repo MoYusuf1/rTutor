@@ -133,7 +133,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 /* ---------- lesson ---------- */
 #canvas, #doc { overflow-y: auto; padding: 44px 56px 120px; }
 #doc { flex: 1; }
-.canvas-head { max-width: 900px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 10px; }
+.canvas-head { max-width: 720px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 10px; }
 #title, #doc-title { font: 650 32px/1.2 var(--read); margin: 0; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .notes { font: 13.5px/1.55 var(--ui); color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
 .notes summary { cursor: pointer; font-weight: 600; list-style: none; }
@@ -141,7 +141,7 @@ body.drawer-open > main { align-self: flex-start; height: calc(100% - var(--draw
 .notes[open] summary::before { content: "▾ "; }
 .notes .md { margin-top: 6px; color: var(--text); }
 .notes .md > :last-child { margin-bottom: 0; }
-#canvas-body, #doc-body { max-width: 900px; margin: 0 auto; font: 18px/1.7 var(--read); }
+#canvas-body, #doc-body { max-width: 720px; margin: 0 auto; font: 18px/1.75 var(--read); }
 #doc-body pre.plain { white-space: pre-wrap; font: inherit; margin: 24px 0; }
 #canvas-body > * { margin-top: 28px; scroll-margin-top: 24px; }
 /* new content writes itself in from the top, the way a teacher writes on a board */
@@ -425,3 +425,24 @@ dialog[open] { animation: pop 0.16s ease-out; }
 #lesson.loading #canvas-body, #lesson.loading #log { opacity: 0.4; transition: opacity 0.2s; }
 /* where older parts of a long lesson load in as they are scrolled to */
 .more { height: 1px; }
+
+/* ---------- reading the canvas: a comfortable line length (about 70 characters), air between ideas, and a quiet
+   divider between one response of the tutor and the next ---------- */
+#canvas-body p { margin: 0 0 0.9em; }
+#canvas-body :is(ul, ol) { margin: 0.4em 0 1em; padding-left: 1.3em; }
+#canvas-body li + li { margin-top: 0.35em; }
+#canvas-body :is(h2, h3) { margin: 1.4em 0 0.5em; }
+#canvas-body .md > :is(h1, h2, h3):first-child { margin-top: 0; }
+#canvas-body .md > :last-child { margin-bottom: 0; }
+#canvas-body strong { color: var(--text); font-weight: 650; }
+#canvas-body .md table { margin: 0.6em 0 1.1em; font-size: 0.85em; }
+#canvas-body .md :is(th, td) { padding: 7px 14px; }
+/* each new response starts below a faint rule, except a quiz result, which belongs with the step above it */
+#canvas-body > .md + .md:not(:has(> .callout:only-child))::before {
+  content: ""; display: block; height: 1px; margin: 0 0 40px;
+  background: linear-gradient(90deg, transparent, var(--line) 15%, var(--line) 85%, transparent);
+}
+#canvas-body > .md + .md:not(:has(> .callout:only-child)) { margin-top: 44px; }
+/* the app keeps these scrollers' positions itself when it adds above (lazy.js); the browser's own anchoring would
+   move them a second time */
+#log, #canvas { overflow-anchor: none; }

@@ -1,10 +1,11 @@
 // The lesson canvas: the lesson itself, one section per write_lesson, plus the tutor's notes.
 import { invoke } from "@tauri-apps/api/core";
-import { $ } from "./dom.js";
+import { $, setTitle } from "./dom.js";
 import { md, drawDiagrams } from "./markdown.js";
 import { app, leadHeading } from "./state.js";
 import { newestFirst } from "./lazy.js";
 import { refresh } from "./sidebar.js";
+import { toBottom } from "./chat.js";
 
 const body = () => $("#canvas-body");
 let stopLazy = () => {};
@@ -35,7 +36,7 @@ export function showLatest() {
   const last = body().lastElementChild;
   if (last) last.scrollIntoView({ block: "start" });
   else $("#canvas").scrollTop = 0;
-  $("#log").scrollTop = $("#log").scrollHeight;
+  toBottom();
 }
 
 export function showNotes(markdown) {
@@ -59,7 +60,7 @@ export async function addSection(markdown, live, to = app.lesson) {
   if (to.sections++ === 0 && leadHeading(markdown)) {
     to.title = leadHeading(markdown);
     if (shown) {
-      $("#title").textContent = to.title;
+      setTitle(to.title);
       body().classList.add("titled");
     }
     await invoke("rename_lesson", { id: to.id, title: to.title });

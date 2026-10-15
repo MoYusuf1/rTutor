@@ -7,8 +7,8 @@ import { liveMarkdown, log, note, say, thinking, workBody } from "./chat.js";
 import { partialField } from "./markdown.js";
 import { executeTool, forTutor } from "./tools.js";
 import { setWorking } from "./composer.js";
-import { refresh } from "./sidebar.js";
 import { showWho } from "./who.js";
+import { handOverToApi } from "./agents.js";
 
 export const PRESETS = {
   nvidia: { label: "NVIDIA", kind: "openai", baseUrl: "https://integrate.api.nvidia.com/v1", model: "moonshotai/kimi-k3", logo: "nvidia" },
@@ -75,6 +75,7 @@ $("#settings").addEventListener("close", async () => {
     alert(e);
   }
   showWho();
+  handOverToApi(); // a message that was waiting for an agent goes to the provider just chosen
 });
 
 $("#p-test").onclick = async () => {
@@ -238,15 +239,15 @@ async function runLoop(first) {
     if (mine === app.gen && e !== "Stopped.") note(`Something went wrong: ${e}`);
   } finally {
     if (busy === me.id) busy = null;
-    setWorking();
-    refresh();
+    setWorking(); // the sidebar refreshes itself when a title changes (canvas.js), not after every turn
   }
 }
 
+/** `shown`: what the chat shows for it, or null when it is already there (a message handed over from an agent). */
 export async function sendToApi(text, shown) {
   if (busy === app.lesson.id) return note("One moment, the tutor is still answering.");
   if (!(await ready())) return openModel();
-  say(shown, "user");
+  if (shown != null) say(shown, "user");
   runLoop(text);
 }
 

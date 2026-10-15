@@ -15,8 +15,9 @@ export const SUGGEST = {
   none: [["Find what I know", GEARS.probe.tell], ["Teach me from scratch", GEARS.scratch.tell], ["Test me", GEARS.test.tell]],
   probe: [["Start teaching", "That's enough questions about what I know. Make the plan and start teaching."], ["Test me instead", "Skip ahead and test me on this."]],
   plan: [["Looks good, start", "The plan looks good. Start teaching."], ["Change the plan", "I'd like to change the plan."]],
-  teach: [["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."], ["Check what I know", "Pause teaching and check what I already know about what's next."]],
-  review: [["Back to teaching", "Let's go back to teaching the next part."], ["Explain my misses", "Explain the ones I got wrong."]],
+  teach: [["I don't get it", "I don't understand this yet. Teach it again from a different angle, slower, with an example."], ["Another angle", "Explain that from a different angle."], ["Quiz me", "Quiz me on what we just covered."], ["Test me on everything", "Test me on everything so far."], ["Check what I know", "Pause teaching and check what I already know about what's next."]],
+  // "back to teaching" means teach what I just struggled with, not move on: moving on is its own choice
+  review: [["Teach me this", "I don't understand this yet. Stop testing and teach me the part I just got wrong, from the start, step by step, before any more questions."], ["Explain my misses", "Explain the ones I got wrong."], ["Next part", "I've got this. Move on to teaching the next part."]],
 };
 
 /** The learner's words without the instructions the app added for the tutor (the gear, a handoff note). */

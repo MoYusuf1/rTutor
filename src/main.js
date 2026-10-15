@@ -11,7 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { $, store } from "./dom.js";
 import { icon } from "./icons.js";
 import { app } from "./state.js";
-import { note } from "./chat.js";
+import { aside } from "./chat.js";
 import { refresh, setCollapsed } from "./sidebar.js";
 import { startNew } from "./start.js";
 import { toggleSources } from "./lesson.js";
@@ -31,7 +31,7 @@ addEventListener("click", (e) => {
 });
 addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  $("#menu").hidden = $("#pop").hidden = true;
+  $("#menu").hidden = $("#pop").hidden = $("#pomo-pop").hidden = true;
   toggleSources(false);
 });
 
@@ -45,7 +45,7 @@ await listenToAgents();
 startTimer({
   get: () => s.pomo,
   set: (pomo) => { s.pomo = pomo; saveSettings(); },
-  note: (text) => app.lesson && note(text),
+  note: (text) => app.lesson && aside(text),
   opened: () => toggleSources(false),
 });
 await initTerminal();

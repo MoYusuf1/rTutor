@@ -1,7 +1,7 @@
 // The lesson view: opening a lesson (its canvas and its chat, replayed as they were), the Sources panel, the
 // phase shortcuts, and the material viewer.
 import { invoke } from "@tauri-apps/api/core";
-import { $, el } from "./dom.js";
+import { $, el, setTitle } from "./dom.js";
 import { icon } from "./icons.js";
 import { md } from "./markdown.js";
 import { app, fmt, materialsFor } from "./state.js";
@@ -19,6 +19,7 @@ import { showWho } from "./who.js";
 
 export function show(view) {
   for (const v of ["start", "lesson", "doc"]) $(`#${v}`).hidden = v !== view;
+  if (view !== "lesson") document.title = "rTutor";
 }
 
 /** Leaving the open lesson: anything still waiting on the learner there is let go. */
@@ -34,7 +35,7 @@ let stopChat = () => {};
 export function showLesson() {
   const l = app.lesson;
   show("lesson");
-  $("#title").textContent = l.title;
+  setTitle(l.title);
   stopChat();
   log().replaceChildren();
   showSections([], l.title);
@@ -83,16 +84,25 @@ export async function openLesson(id) {
   app.target = l.folder;
   showLesson();
   showSections(l.sections, l.title);
-  // the phase: the last one reported, else the gear the lesson started in, else teaching if it is under way
-  for (const m of l.messages) {
-    if (m.role === "assistant" && Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_use" && b.name === "phase") app.lesson.phase = b.input?.phase;
-  }
-  const first = l.messages[0]?.content;
-  app.lesson.phase ??= (typeof first === "string" && gearOf(first)?.phase) || (l.sections.length ? "teach" : null);
+  // the phase: the last one reported (Rust reads the whole history for it), else the gear the lesson started in,
+  // else teaching if it is under way
+  app.lesson.phase = l.phase ?? ((typeof l.opener === "string" && gearOf(l.opener)?.phase) || (l.sections.length ? "teach" : null));
   const results = app.lesson.toolResults;
+  // calls that have an answer; results always come after their call, so newer pages fill this before older ones replay
   const answered = new Set();
-  for (const m of l.messages) if (m.role === "user" && Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result") answered.add(b.tool_use_id);
-  stopChat = newestFirst({ box: log(), scroller: log(), items: l.messages, batch: 40, render: (m, frag) => renderInto(frag, () => replay(m, results, answered)) });
+  const learn = (page) => {
+    for (const m of page) if (m.role === "user" && Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result") answered.add(b.tool_use_id);
+    return page;
+  };
+  // only the newest page of the chat arrives with the lesson; older pages load as the learner scrolls up to them
+  let before = l.older;
+  const older = async () => {
+    if (!before || mine !== app.gen) return [];
+    const page = await invoke("lesson_history", { id, before }).catch(() => []);
+    before -= page.length;
+    return learn(page);
+  };
+  stopChat = newestFirst({ box: log(), scroller: log(), items: learn(l.messages), batch: 40, older, render: (m, frag) => renderInto(frag, () => replay(m, results, answered)) });
   // open on the newest part, not the top (diagrams and fonts settle a moment later, so look again)
   showLatest();
   setTimeout(() => mine === app.gen && showLatest(), 400);

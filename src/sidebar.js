@@ -1,8 +1,9 @@
 // The sidebar: subjects with their lessons, pinned lessons, search, renaming, drag and drop, and the context menu.
 import { invoke } from "@tauri-apps/api/core";
-import { $, el, store } from "./dom.js";
+import { $, el, store, setTitle } from "./dom.js";
 import { icon } from "./icons.js";
-import { app, setTree } from "./state.js";
+import { app, setTree, subjectDir } from "./state.js";
+import { subjectGone, subjectMoved } from "./agents.js";
 import { menu } from "./dialogs.js";
 import { openLesson, openSource } from "./lesson.js";
 import { attach, startNew } from "./start.js";
@@ -109,8 +110,13 @@ function rename(r) {
     renaming = null;
     const value = input.value.trim();
     if (save && value && value !== (it.name ?? it.title)) {
+      const before = kind === "folder" ? subjectDir(id) : "";
       await invoke(kind === "folder" ? "rename_folder" : "rename_lesson", kind === "folder" ? { id, name: value } : { id, title: value });
-      if (kind === "lesson" && app.lesson?.id === id) $("#title").textContent = app.lesson.title = value;
+      if (before) {
+        await refresh();
+        if (subjectDir(id) !== before) subjectMoved(before, subjectDir(id)); // its folder moved, and its agent with it
+      }
+      if (kind === "lesson" && app.lesson?.id === id) setTitle((app.lesson.title = value));
     }
     refresh();
   };
@@ -167,7 +173,9 @@ side.addEventListener("contextmenu", (e) => {
       "-",
       { label: "Rename", run: () => rename(r) },
       { label: "Delete subject", danger: true, confirm: [`Delete “${it.name}”?`, "Its lessons and material go too. This can't be undone.", "Delete subject"], run: async () => {
+        const dir = subjectDir(id);
         await invoke("delete_folder", { id });
+        if (dir) subjectGone(dir);
         if (app.lesson && !app.data.lessons.some((l) => l.id === app.lesson.id && l.folder !== id)) startNew(null);
         refresh();
       } },

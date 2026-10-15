@@ -224,6 +224,8 @@ fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, switch
         out.push_str(&crate::brief(app, lesson)?);
     }
     out.push_str(&format!("The learner says:\n\n{text}"));
+    // a style rule stated once fades over a long conversation; one line each turn keeps it
+    out.push_str("\n\n(Reply in plain English: short sentences, everyday words, one idea at a time.)");
     Ok(out)
 }
 
@@ -392,10 +394,11 @@ pub fn agent_result(bridge: tauri::State<Bridge>, id: u64, result: Value) {
 
 /// The learner pressed stop: that agent's next lesson tool call is refused, and its unsent messages are dropped.
 #[tauri::command]
-pub fn agent_stop(bridge: tauri::State<Bridge>, id: Option<u64>) {
+pub fn agent_stop(bridge: tauri::State<Bridge>, id: Option<u64>, lesson: Option<i64>) {
     let mut s = bridge.lock();
     let agent = id.or(s.active);
-    let keep: VecDeque<Item> = s.inbox.iter().filter(|i| s.owner(i) != agent).cloned().collect();
+    // its queued messages go, and so do the lesson's own (one may be waiting for an agent that's still starting)
+    let keep: VecDeque<Item> = s.inbox.iter().filter(|i| s.owner(i) != agent && Some(i.lesson) != lesson).cloned().collect();
     s.inbox = keep;
     if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == agent) {
         (a.stopped, a.busy, a.unanswered, a.owes) = (true, false, None, false);
@@ -511,7 +514,7 @@ mod tests {
         send(&app, "Hello, teach me");
         // asking again gets the message: it wasn't handed to the dropped call
         let text = reply(agent.call("next"));
-        assert!(text.ends_with("The learner says:\n\nHello, teach me"), "{text}");
+        assert!(text.contains("The learner says:\n\nHello, teach me"), "{text}");
         assert_eq!(history(&app), 1, "recorded once, when it was received");
     }
 
@@ -525,7 +528,7 @@ mod tests {
         assert_eq!(reply(agent.call("next")), FINISH_STEP, "waiting now would leave the learner with nothing to do");
         // reminded once: the next call waits for the learner as usual
         send(&app, "ok");
-        assert!(reply(agent.call("next")).ends_with("The learner says:\n\nok"));
+        assert!(reply(agent.call("next")).contains("The learner says:\n\nok"));
     }
 
     #[test]
