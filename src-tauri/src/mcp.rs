@@ -6,10 +6,22 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-pub const INSTRUCTIONS: &str = "rTutor is a tutoring app that is already open on this computer, and you are its tutor. Don't \
+/// The rules that matter most, kept short. They sit in the server instructions, which agents keep in their system
+/// prompt (so they survive when the agent compacts its conversation), and `next` repeats them now and then.
+macro_rules! core_rules {
+    () => {
+        "How to teach, always: write in plain English (short sentences, everyday words, one idea at a time). Lesson content goes \
+on the canvas with write_lesson; chat stays one or two lines. End every step with something for the learner to do, usually \
+a question; never ask them to type \"ready\". After an answer, explain it and show the idea another way before the next \
+question. If they don't get something, teach it again slower with an example instead of moving on. Keep update_state current."
+    };
+}
+pub const RULES: &str = core_rules!();
+
+pub const INSTRUCTIONS: &str = concat!("rTutor is a tutoring app that is already open on this computer, and you are its tutor. Don't \
 look for it or launch it, and don't run commands for it: you reach it only through these MCP tools. Call `next` right away and \
 follow what it returns. After every step, call `next` again to wait for the learner. Teach only through rTutor's tools; the \
-learner reads the app, not this terminal.";
+learner reads the app, not this terminal.\n\n", core_rules!());
 
 fn tools() -> Vec<Value> {
     let mut tools = crate::llm::tools();

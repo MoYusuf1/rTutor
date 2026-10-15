@@ -198,9 +198,7 @@ fn material(c: &Connection, lesson: i64) -> Res<String> {
         if !file.is_empty() {
             s.push_str(&format!("File: {file}\n"));
         }
-        for (i, label) in labels.iter().enumerate() {
-            s.push_str(&format!("{}. {label}\n", i + 1));
-        }
+        s.push_str(&contents(&labels));
     }
     Ok(s)
 }
@@ -227,15 +225,42 @@ fn set_subject_notes(store: State<Store>, lesson: i64, markdown: String) -> Res<
     Ok(())
 }
 
+/// A source's contents as numbered parts. A long book's would cost thousands of tokens in every brief, so past
+/// `LINES` parts it lists ranges (each named by its first part) and `search_material` finds the exact one.
+fn contents(labels: &[String]) -> String {
+    const LINES: usize = 40;
+    let per = labels.len().div_ceil(LINES).max(1);
+    let mut s = String::new();
+    for (i, group) in labels.chunks(per).enumerate() {
+        let a = i * per + 1;
+        match group.len() {
+            1 => s.push_str(&format!("{a}. {}\n", group[0])),
+            n => s.push_str(&format!("{a}–{}. {}\n", a + n - 1, group[0])),
+        }
+    }
+    s
+}
+
 /// What a terminal agent is told the first time it teaches a lesson: the lesson so far, so it continues instead of
-/// starting over, plus the learner's material.
-fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<String> {
+/// starting over, plus the learner's material. Not `full` (back to a lesson it was briefed on): just where it stands.
+fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, full: bool) -> Res<String> {
     let store = app.state::<Store>();
     let c = store.db()?;
     let (title, state, count): (String, String, i64) = c
         .query_row("SELECT title, state, (SELECT COUNT(*) FROM sections WHERE lesson_id = ?1) FROM lessons WHERE id = ?1", [lesson], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .map_err(err)?;
     let mut s = format!("# Lesson: {title}\n\n");
+    if !full {
+        if !state.is_empty() {
+            s.push_str(&format!("Your lesson state:\n\n{state}\n\n"));
+        }
+        let last: Option<String> = c.query_row("SELECT markdown FROM sections WHERE lesson_id = ?1 ORDER BY id DESC LIMIT 1", [lesson], |r| r.get(0)).optional().map_err(err)?;
+        if let Some(last) = last {
+            s.push_str(&format!("The canvas ends with:\n\n{last}\n"));
+        }
+        s.push_str("\n---\n\n");
+        return Ok(s);
+    }
     if let Some(dir) = lesson_dir(&c, lesson)? {
         s.push_str(&format!(
             "Its folder is {} (lesson.md is the canvas so far, notes.md your lesson notes). rTutor keeps these files; \
@@ -879,6 +904,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running rTutor");
+}
+
+#[cfg(test)]
+mod contents_tests {
+    #[test]
+    fn a_long_book_is_listed_in_ranges() {
+        let short: Vec<String> = (1..=3).map(|i| format!("Part {i}")).collect();
+        assert_eq!(super::contents(&short), "1. Part 1\n2. Part 2\n3. Part 3\n");
+        let long: Vec<String> = (1..=250).map(|i| format!("Part {i}")).collect();
+        let listed = super::contents(&long);
+        assert!(listed.lines().count() <= 40, "{listed}");
+        assert!(listed.starts_with("1–7. Part 1\n8–14. Part 8\n") && listed.ends_with("246–250. Part 246\n"), "{listed}");
+    }
 }
 
 #[cfg(test)]

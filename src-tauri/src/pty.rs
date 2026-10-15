@@ -60,7 +60,9 @@ pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, col
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
-    cmd.env("MCP_TOOL_TIMEOUT", "1800000"); // Claude Code waits up to 30 minutes for the learner's answer to a tool call
+    // Claude Code waits up to a day on a tool call: `next` waits for the learner, and each time it gives up and is asked
+    // again costs the agent a turn
+    cmd.env("MCP_TOOL_TIMEOUT", "86400000");
     if !cwd.is_empty() {
         let _ = std::fs::create_dir_all(&cwd); // e.g. ~/rtutor on first use
     }

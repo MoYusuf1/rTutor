@@ -48,7 +48,7 @@ export function quickStarts() {
   return {
     // the prompt goes first: --mcp-config and --allowedTools take every word after them
     claude: ["Claude Code", "claude", `claude ${go}${cm ? ` --model "${cm}"` : ""}${ce ? ` --effort ${ce}` : ""} --restricted --strict-mcp-config --disable-slash-commands --mcp-config "${config}" --allowedTools mcp__rtutor`],
-    codex: ["Codex", "openai", `codex${xm ? ` -m "${xm}"` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c "mcp_servers.rtutor.command='${bin}'" -c "mcp_servers.rtutor.args=['--mcp']" -c mcp_servers.rtutor.tool_timeout_sec=1800 -c "mcp_servers.rtutor.default_tools_approval_mode='approve'" ${go}`],
+    codex: ["Codex", "openai", `codex${xm ? ` -m "${xm}"` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c "mcp_servers.rtutor.command='${bin}'" -c "mcp_servers.rtutor.args=['--mcp']" -c mcp_servers.rtutor.tool_timeout_sec=86400 -c "mcp_servers.rtutor.default_tools_approval_mode='approve'" ${go}`],
   };
 }
 

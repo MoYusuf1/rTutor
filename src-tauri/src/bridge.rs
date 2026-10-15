@@ -25,8 +25,12 @@ fn closed(stream: &TcpStream) -> bool {
     gone
 }
 
-/// How long `next` waits before telling the agent to ask again. Below the tool timeouts rTutor sets up.
-const WAIT: Duration = Duration::from_secs(20 * 60);
+/// How long `next` waits before telling the agent to ask again. Below the 24-hour tool timeouts rTutor starts agents
+/// with: every "ask again" costs the agent a turn, so an idle tutor should wake rarely.
+const WAIT: Duration = Duration::from_secs(8 * 60 * 60);
+
+/// Every this many messages, `next` repeats the core rules (in case the agent's own summary dropped them).
+const REFRESH: u32 = 15;
 
 /// What `next` says, once a turn, to an agent that ends a step without giving the learner anything to do.
 const FINISH_STEP: &str = "Not yet: this step ended without anything for the learner to do, so they would be left \
@@ -60,7 +64,9 @@ struct Agent {
     #[serde(skip)]
     stopped: bool,
     #[serde(skip)]
-    unanswered: Option<(i64, String)>, // the last message it got, until it does something with it
+    unanswered: Option<Unanswered>, // the last message it got, until it does something with it
+    #[serde(skip)]
+    delivered: u32, // messages it has had, for the occasional rules refresher
     #[serde(skip)]
     owes: bool, // it showed the learner something after its last question: the step isn't finished
     #[serde(skip)]
@@ -71,6 +77,16 @@ struct Agent {
     briefed: HashSet<i64>, // lessons whose brief it has had (cleared when the subject's material changes)
     #[serde(skip)]
     taught: bool, // it has had the teaching instructions
+}
+
+/// A message handed to an agent and what came with it, so a re-send carries the same and no more.
+#[derive(Clone)]
+struct Unanswered {
+    lesson: i64,
+    text: String,
+    first: bool,
+    new_lesson: bool,
+    switched: bool,
 }
 
 /// If rTutor is already running, asks it to come forward and returns true (this launch should then exit).
@@ -166,7 +182,7 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
             s.seq += 1;
             let id = s.seq;
             let text = |k: &str| hello[k].as_str().unwrap_or_default().to_owned();
-            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false });
+            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, delivered: 0, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false });
             if s.active.is_none() {
                 s.active = Some(id);
             }
@@ -216,8 +232,9 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
 }
 
 /// What `next` returns: how to teach (first time), the lesson so far (first time in this lesson), the message.
-/// `switched`: the learner moved here from another lesson this agent teaches.
-fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, switched: bool, lesson: i64, text: &str) -> Result<String, String> {
+/// `switched`: the learner moved here from another lesson this agent teaches. `refresh`: repeat the core rules.
+fn compose<R: Runtime>(app: &AppHandle<R>, m: &Unanswered, refresh: bool) -> Result<String, String> {
+    let Unanswered { lesson, ref text, first, new_lesson, switched } = *m;
     let mut out = String::new();
     if first {
         out.push_str(crate::PROMPT);
@@ -231,11 +248,18 @@ fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, switch
         ));
     }
     if new_lesson {
-        out.push_str(&crate::brief(app, lesson)?);
+        out.push_str(&crate::brief(app, lesson, true)?);
+    } else if switched {
+        // back to a lesson it taught earlier: where it stands now, since its memory of it may be summarized away
+        out.push_str(&crate::brief(app, lesson, false)?);
     }
     out.push_str(&format!("The learner says:\n\n{text}"));
-    // a style rule stated once fades over a long conversation; one line each turn keeps it
-    out.push_str("\n\n(Reply in plain English: short sentences, everyday words, one idea at a time.)");
+    // a style rule stated once fades over a long conversation; a line each turn (and the rules now and then) keeps it
+    if refresh && !first {
+        out.push_str(&format!("\n\n(A reminder. {})", crate::mcp::RULES));
+    } else {
+        out.push_str("\n\n(Reply in plain English: short sentences, everyday words, one idea at a time.)");
+    }
     Ok(out)
 }
 
@@ -276,13 +300,14 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     if tool == "next" {
         // asking again without having acted on the last message means it never really got it (an agent can
         // end its turn while a call is still out): hand the same message over again
-        if let Some((lesson, text)) = a.unanswered.clone() {
-            (a.busy, a.waiting, a.lesson) = (true, false, lesson);
+        if let Some(mut m) = a.unanswered.clone() {
+            (a.busy, a.waiting, a.lesson) = (true, false, m.lesson);
             note(format!("agent #{agent} asked again without answering; handing the message over again"));
             bridge.changed(&s);
             drop(s);
-            // it may have missed the brief too, so it comes along again
-            return Ok((compose(app, true, true, false, lesson, &format!("(You may have missed this.) {text}"))?, None));
+            // whatever came with it (the instructions, the brief) comes again, and nothing more
+            m.text = format!("(You may have missed this.) {}", m.text);
+            return Ok((compose(app, &m, false)?, None));
         }
         // a step that ends on something to read, with nothing to do, leaves the learner waiting: send it back once
         if a.owes && !a.reminded {
@@ -317,11 +342,14 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
         let first = !std::mem::replace(&mut a.taught, true);
         let new_lesson = a.briefed.insert(lesson);
         let switched = a.lesson != 0 && a.lesson != lesson;
-        (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some((lesson, text.clone())));
+        a.delivered += 1;
+        let refresh = a.delivered % REFRESH == 0;
+        let m = Unanswered { lesson, text, first, new_lesson, switched };
+        (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some(m.clone()));
         (a.owes, a.reminded) = (false, false); // the learner has the floor again
         bridge.changed(&s);
         drop(s);
-        return Ok((compose(app, first, new_lesson, switched, lesson, &text)?, Some((lesson, text))));
+        return Ok((compose(app, &m, refresh)?, Some((m.lesson, m.text))));
     }
     // a lesson tool: the page runs it and answers with a tool_result
     a.unanswered = None;
@@ -363,9 +391,16 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     let mut result = result;
     result["type"] = json!("tool_result");
     result["tool_use_id"] = json!(use_id);
+    // the agent has the material's text in its own context; the saved history needs only that it was read (a book
+    // would otherwise be copied into the database a part at a time)
+    let mut kept = result.clone();
+    if matches!(tool, "read_material" | "search_material") && result["is_error"] != true {
+        let words = result["content"].as_str().map_or(0, |t| t.split_whitespace().count());
+        kept["content"] = json!(format!("[{words} words of material, left out of the saved lesson. Read it again if you need it.]"));
+    }
     crate::record_all(app, lesson, vec![
         json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": use_id, "name": tool, "input": input }] }),
-        json!({ "role": "user", "content": [result.clone()] }),
+        json!({ "role": "user", "content": [kept] }),
     ])?;
     let text = result["content"].as_str().unwrap_or_default().to_owned();
     if result["is_error"] == true { Err(text) } else { Ok((text, None)) }
@@ -497,7 +532,7 @@ mod tests {
     fn each_subject_goes_to_the_agent_running_in_its_folder() {
         let agent = |id: u64, cwd: &str| super::Agent {
             id, name: "codex".into(), cwd: cwd.into(), cmd: String::new(), busy: false, waiting: true, stopped: false,
-            unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false,
+            unanswered: None, delivered: 0, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false,
         };
         let item = |dir: &str, own: bool| Item { lesson: 1, text: "hi".into(), dir: dir.into(), own };
         let mut s = S { agents: vec![agent(1, "/home/me/rtutor"), agent(2, "/home/me/rtutor/Somali")], active: Some(1), ..S::default() };
@@ -560,6 +595,24 @@ mod tests {
         agent_send(app.handle().clone(), app.state::<Bridge>(), 2, "Now numbers".into(), None).unwrap();
         let text = reply(agent.call("next"));
         assert!(text.contains(r#"is now in the lesson "Numbers""#) && text.contains("Don't ask which lesson"), "{text}");
+        // back to the first lesson: where it stands, not the whole brief again
+        app.state::<crate::Store>().db().unwrap().execute_batch("INSERT INTO sections (lesson_id, markdown) VALUES (1, '## Salaan means hello');").unwrap();
+        let _ = reply(agent.call("phase"));
+        send(&app, "Back to greetings");
+        let back = reply(agent.call("next"));
+        assert!(back.contains("The canvas ends with:\n\n## Salaan means hello") && !back.contains("Its folder is"), "{back}");
+    }
+
+    #[test]
+    fn the_core_rules_come_back_every_few_messages() {
+        let (app, dir) = app("refresh");
+        let agent = Agent::join(&dir);
+        for i in 1..=REFRESH {
+            send(&app, &format!("message {i}"));
+            let text = reply(agent.call("next"));
+            assert_eq!(text.contains("A reminder. How to teach"), i == REFRESH, "message {i}: {text}");
+            let _ = reply(agent.call("phase"));
+        }
     }
 
     #[test]
@@ -572,5 +625,11 @@ mod tests {
         let again = reply(agent.call("next"));
         assert!(again.contains("You may have missed this") && again.contains("iska warran"), "{again}");
         assert_eq!(history(&app), 1, "the repeat isn't a second message");
+        // a later message re-sent carries just itself: the instructions came with the first one
+        let _ = reply(agent.call("phase"));
+        send(&app, "And nabad?");
+        let _ = reply(agent.call("next"));
+        let again = reply(agent.call("next"));
+        assert!(again.contains("nabad") && !again.contains(crate::PROMPT.lines().next().unwrap()), "{again}");
     }
 }
