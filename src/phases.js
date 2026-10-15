@@ -20,11 +20,17 @@ export const SUGGEST = {
   review: [["Teach me this", "I don't understand this yet. Stop testing and teach me the part I just got wrong, from the start, step by step, before any more questions."], ["Explain my misses", "Explain the ones I got wrong."], ["Next part", "I've got this. Move on to teaching the next part."]],
 };
 
-/** The learner's words without the instructions the app added for the tutor (the gear, a handoff note). */
+/** What the app adds to a learner's message for the tutor. Always one shape, `[rTutor: …]` at the end, so the chat
+ *  can take it off again whatever it says (and whatever later versions make it say). */
+export const appNote = (text) => `\n\n[rTutor: ${text}]`;
+export const gearNote = (g) => appNote(`how the learner wants to start: "${g.tell}"`);
+
+/** The learner's words without the notes the app added for the tutor (the gear, a handoff note). */
 export function learnerWords(text = "") {
+  // lessons started before notes had one shape end with the gear's bare text
   for (const g of Object.values(GEARS)) if (text.endsWith(`\n\n${g.tell}`)) return text.slice(0, -g.tell.length - 2);
-  return text.replace(/\n\n\[rTutor: [^\]]*\]$/, "");
+  return text.replace(/(?:(?:^|\n\n)\[rTutor: [^\]]*\])+$/, "");
 }
 
 /** The gear a lesson started in, read from its first message. */
-export const gearOf = (first = "") => Object.values(GEARS).find((g) => first.endsWith(g.tell));
+export const gearOf = (first = "") => Object.values(GEARS).find((g) => first.endsWith(g.tell) || first.endsWith(gearNote(g)));

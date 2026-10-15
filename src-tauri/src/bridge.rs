@@ -457,7 +457,7 @@ pub fn agent_send<R: Runtime>(app: AppHandle<R>, bridge: tauri::State<Bridge>, l
     let dir = {
         let store = app.state::<crate::Store>();
         let c = store.db()?;
-        crate::db::subject_of_lesson(&c, lesson)?.map(|(_, name, _)| crate::material::subject_dir(&name).display().to_string()).unwrap_or_default()
+        crate::db::subject_of_lesson(&c, lesson)?.map(|s| s.home.display().to_string()).unwrap_or_default()
     };
     let mut s = bridge.lock();
     let item = Item { lesson, text, dir, own: own.unwrap_or(false) };

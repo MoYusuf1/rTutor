@@ -192,7 +192,7 @@ fn system_prompt(c: &Connection, lesson: i64) -> Res<String> {
 /// goes in whole; a textbook goes in as its contents, and the tutor reads parts with its tools.
 fn material(c: &Connection, lesson: i64) -> Res<String> {
     const INLINE: i64 = 12_000; // words
-    let notes = db::subject_of_lesson(c, lesson)?.map(|s| s.2).unwrap_or_default();
+    let notes = db::subject_of_lesson(c, lesson)?.map(|s| s.notes).unwrap_or_default();
     let mut s = if notes.trim().is_empty() {
         String::new()
     } else {
@@ -249,9 +249,8 @@ fn stop_turn(store: State<Store>, lesson: i64) -> Res<()> {
 #[tauri::command]
 fn set_subject_notes(store: State<Store>, lesson: i64, markdown: String) -> Res<()> {
     let c = store.db()?;
-    let (id, name, _) = db::subject_of_lesson(&c, lesson)?.ok_or("This lesson isn't in a subject.")?;
+    let db::Subject { id, name, home: dir, .. } = db::subject_of_lesson(&c, lesson)?.ok_or("This lesson isn't in a subject.")?;
     exec(&c, "UPDATE folders SET notes = ?2 WHERE id = ?1", params![id, markdown])?;
-    let dir = material::subject_dir(&name);
     let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("notes.md"), format!("# {name}: tutor's notes\n\n{markdown}\n")));
     store.forget(None);
     Ok(())
@@ -455,14 +454,7 @@ async fn send(
 
 #[tauri::command]
 fn tree(store: State<Store>) -> Res<Value> {
-    let mut t = db::tree(&*store.reader()?)?;
-    // each subject's folder on disk: where its agent runs
-    for f in t["folders"].as_array_mut().into_iter().flatten() {
-        if f["parent"].is_null() {
-            f["dir"] = json!(material::subject_dir(f["name"].as_str().unwrap_or_default()).display().to_string());
-        }
-    }
-    Ok(t)
+    db::tree(&*store.reader()?)
 }
 
 // ---------- lesson folders: ~/rtutor/<subject>/<lesson>/ mirrors each lesson as files ----------
@@ -473,8 +465,8 @@ fn lesson_dir(c: &Connection, lesson: i64) -> Res<Option<std::path::PathBuf>> {
     if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
         return Ok(Some(dir.into()));
     }
-    let Some((_, subject, _)) = db::subject_of_lesson(c, lesson)? else { return Ok(None) };
-    let dir = material::fresh_dir(&material::subject_dir(&subject), &title);
+    let Some(subject) = db::subject_of_lesson(c, lesson)? else { return Ok(None) };
+    let dir = material::fresh_dir(&subject.home, &title);
     std::fs::create_dir_all(&dir).map_err(err)?;
     exec(c, "UPDATE lessons SET dir = ?2 WHERE id = ?1", params![lesson, dir.display().to_string()])?;
     Ok(Some(dir))
@@ -631,18 +623,28 @@ async fn export_lesson(app: tauri::AppHandle, id: i64) -> Res<bool> {
 fn create_folder(store: State<Store>, parent: Option<i64>, name: String) -> Res<i64> {
     let c = store.db()?;
     exec(&c, "INSERT INTO folders (parent_id, name) VALUES (?1, ?2)", params![parent, name])?;
-    Ok(c.last_insert_rowid())
+    let id = c.last_insert_rowid();
+    db::give_home(&c, id)?;
+    Ok(id)
 }
 
 #[tauri::command]
 fn rename_folder(store: State<Store>, id: i64, name: String) -> Res<()> {
     let c = store.db()?;
-    let (old, top): (String, bool) = c.query_row("SELECT name, parent_id IS NULL FROM folders WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
+    let top: bool = c.query_row("SELECT parent_id IS NULL FROM folders WHERE id = ?1", [id], |r| r.get(0)).map_err(err)?;
+    let old = top.then(|| db::subject_of(&c, id)).transpose()?;
     exec(&c, "UPDATE folders SET name = ?2 WHERE id = ?1", params![id, name])?;
-    if top {
-        material::rename_subject(&old, &name);
-        // the files moved with their folder
-        let (from, to) = (material::subject_dir(&old).display().to_string(), material::subject_dir(&name).display().to_string());
+    if let Some(old) = old {
+        // a renamed subject takes its folder along, to one of its own under the new name
+        if old.home == material::subject_dir(&name) {
+            return Ok(()); // the same folder name (a change of case or spacing that cleans to it)
+        }
+        let to = material::fresh_dir(&material::library(), &name);
+        if old.home.is_dir() && std::fs::rename(&old.home, &to).is_err() {
+            return Ok(()); // couldn't move it (in use, another drive): it keeps its folder under the old name
+        }
+        let (from, to) = (old.home.display().to_string(), to.display().to_string());
+        exec(&c, "UPDATE folders SET dir = ?2 WHERE id = ?1", params![id, to])?;
         exec(&c, "UPDATE sources SET file = ?2 || substr(file, length(?1) + 1) WHERE file LIKE ?1 || '%'", params![from, to])?;
         exec(&c, "UPDATE lessons SET dir = ?2 || substr(dir, length(?1) + 1) WHERE dir LIKE ?1 || '%'", params![from, to])?;
     }
@@ -677,9 +679,9 @@ fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) ->
             exec(&c, "UPDATE lessons SET folder_id = ?2 WHERE id = ?1", params![id, folder])?;
             // its folder moves into the new subject's (a lesson outside any subject keeps no folder)
             let dir: String = c.query_row("SELECT dir FROM lessons WHERE id = ?1", [id], |r| r.get(0)).map_err(err)?;
-            if let (false, Some((_, subject, _))) = (dir.is_empty(), db::subject_of_lesson(&c, id)?) {
+            if let (false, Some(subject)) = (dir.is_empty(), db::subject_of_lesson(&c, id)?) {
                 let old = std::path::Path::new(&dir);
-                let parent = material::subject_dir(&subject);
+                let parent = subject.home;
                 if old.parent() != Some(parent.as_path()) {
                     let new = material::fresh_dir(&parent, &old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                     if std::fs::create_dir_all(&parent).and_then(|_| std::fs::rename(old, &new)).is_ok() {
@@ -695,7 +697,9 @@ fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) ->
                     return Err("A folder can't go inside itself.".into());
                 }
             }
-            exec(&c, "UPDATE folders SET parent_id = ?2 WHERE id = ?1", params![id, folder])?
+            let n = exec(&c, "UPDATE folders SET parent_id = ?2 WHERE id = ?1", params![id, folder])?;
+            db::give_home(&c, id)?; // a folder moved to the top is a subject now, and needs a folder of its own
+            n
         }
         _ => return Err("Only lessons and folders can be moved.".into()),
     };
@@ -799,7 +803,7 @@ async fn add_source(app: tauri::AppHandle, folder: Option<i64>, lesson: Option<i
         };
         let parts = material::chunk(&text);
         // ponytail: a material file that can't be written (read-only home, odd name) just means no file; the parts still work
-        let file = subject.as_deref().map(|s| material::write_file(s, &name, &text).map(|p| p.display().to_string()).unwrap_or_default()).unwrap_or_default();
+        let file = subject.as_ref().map(|s| material::write_file(&s.home, &name, &text).map(|p| p.display().to_string()).unwrap_or_default()).unwrap_or_default();
         let words = text.split_whitespace().count() as i64;
         drop(text);
         let c = store.db()?;
@@ -814,7 +818,7 @@ async fn add_source(app: tauri::AppHandle, folder: Option<i64>, lesson: Option<i
         store.forget(None);
         // agents already teaching this subject were briefed without it: the next message briefs them again
         if let Some(s) = subject {
-            app.state::<bridge::Bridge>().material_changed(&material::subject_dir(&s).display().to_string());
+            app.state::<bridge::Bridge>().material_changed(&s.home.display().to_string());
         }
         Ok(id)
     })
@@ -969,6 +973,11 @@ pub fn run() {
                 relocate_sources(&c);
                 let _ = c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('done:layout-v1', '1')", []);
             }
+            // subjects made before their folder was stored keep the one their name gave them
+            let unhomed: Vec<(i64, String)> = c.prepare("SELECT id, name FROM folders WHERE parent_id IS NULL AND dir = ''").and_then(|mut q| q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()).unwrap_or_default();
+            for (id, name) in unhomed {
+                let _ = c.execute("UPDATE folders SET dir = ?2 WHERE id = ?1", params![id, material::subject_dir(&name).display().to_string()]);
+            }
             // lessons made before they had folders get one, with their page and notes written out
             let pending: Vec<i64> = c.prepare("SELECT id FROM lessons WHERE dir = ''").and_then(|mut q| q.query_map([], |r| r.get(0))?.collect()).unwrap_or_default();
             for id in pending {
@@ -987,6 +996,36 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running rTutor");
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use tauri::Manager;
+
+    #[test]
+    fn subjects_never_share_a_folder() {
+        // the same temporary library the bridge tests use: never the real ~/rtutor
+        std::env::set_var("RTUTOR_LIBRARY", std::env::temp_dir().join(format!("rtutor-library-{}", std::process::id())));
+        let app = tauri::test::mock_app();
+        let path = std::env::temp_dir().join(format!("rtutor-subjects-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        app.manage(super::Store::new(super::db::open(&path).unwrap(), &path).unwrap());
+        let name = format!("Somali {}", std::process::id());
+        let a = super::create_folder(app.state(), None, name.clone()).unwrap();
+        let b = super::create_folder(app.state(), None, name.clone()).unwrap();
+        let home = |id| super::db::subject_of(&app.state::<super::Store>().db().unwrap(), id).unwrap().home;
+        assert_ne!(home(a), home(b), "two subjects with one name get two folders");
+        assert!(home(b).ends_with(format!("{name} (2)")));
+        // renaming the second to the first's name again doesn't land it in the first's folder
+        super::rename_folder(app.state(), b, format!("{name}!")).unwrap();
+        super::rename_folder(app.state(), b, name.clone()).unwrap();
+        assert_ne!(home(a), home(b));
+        assert!(home(b).is_dir(), "its folder moved along");
+        for id in [a, b] {
+            let _ = std::fs::remove_dir_all(home(id));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[cfg(test)]

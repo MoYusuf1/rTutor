@@ -117,19 +117,15 @@ pub fn subject_dir(subject: &str) -> PathBuf {
     library().join(clean(subject))
 }
 
-/// ~/rtutor/<subject>/sources: the material itself.
-pub fn sources_dir(subject: &str) -> PathBuf {
-    subject_dir(subject).join("sources")
-}
-
 /// The same file name without its extension, for spotting the PDF and text copies of one book.
 pub fn stem(name: &str) -> String {
     Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name).trim().to_lowercase()
 }
 
-/// Writes material as Markdown into its subject's sources folder and returns the path. Never overwrites another file.
-pub fn write_file(subject: &str, name: &str, body: &str) -> Res<PathBuf> {
-    let dir = sources_dir(subject);
+/// Writes material as Markdown into its subject's sources folder (`home`/sources) and returns the path. Never
+/// overwrites another file.
+pub fn write_file(home: &Path, name: &str, body: &str) -> Res<PathBuf> {
+    let dir = home.join("sources");
     std::fs::create_dir_all(&dir).map_err(err)?;
     let stem = clean(Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name));
     let mut path = dir.join(format!("{stem}.md"));
@@ -182,14 +178,6 @@ pub fn into_sources(file: &str) -> Option<String> {
     std::fs::create_dir_all(to.parent()?).ok()?;
     std::fs::rename(path, &to).ok()?;
     Some(to.display().to_string())
-}
-
-/// A renamed subject takes its folder along.
-pub fn rename_subject(old: &str, new: &str) {
-    let (from, to) = (subject_dir(old), subject_dir(new));
-    if from != to && from.is_dir() && !to.exists() {
-        let _ = std::fs::rename(from, to);
-    }
 }
 
 /// Removes material files rTutor wrote, and their folder once it's empty. Other files are left alone.

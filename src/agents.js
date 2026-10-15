@@ -7,6 +7,7 @@ import { app, saveSettings, short, subjectDir } from "./state.js";
 import { chatNode, note, refreshWork, say, step, thinking } from "./chat.js";
 import { openQuestion } from "./cards.js";
 import { didTool, executeTool } from "./tools.js";
+import { appNote } from "./phases.js";
 import { renderStart } from "./start.js";
 import { setWorking } from "./composer.js";
 import { renderPop, showWho, openModel } from "./who.js";
@@ -234,7 +235,10 @@ events.onmessage = async (e) => {
     if (dropped.delete(e.id)) {
       // the agent stopped waiting for this answer (its time ran out, or it exited): the answer comes to it as the
       // learner's next message instead of being lost
-      if (result.answer && !result.abandoned) invoke("agent_send", { lesson: e.lesson, text: `(My answer to your earlier question.) ${result.content}` }).catch(() => {});
+      if (result.answer && !result.abandoned) {
+        const late = `the learner answered your earlier question after you stopped waiting. ${result.content}`.replaceAll("]", ")");
+        invoke("agent_send", { lesson: e.lesson, text: appNote(late).trim() }).catch(() => {});
+      }
       return;
     }
     await invoke("agent_result", { id: e.id, result: { content: result.content, is_error: !!result.is_error } });

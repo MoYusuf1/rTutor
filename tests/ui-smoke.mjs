@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { chromium, webkit } from "playwright";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "vite";
+import { GEARS, gearNote, gearOf, learnerWords } from "../src/phases.js";
+
+// the notes the app adds for the tutor come off again in the chat, in any shape a lesson has stored them
+assert.equal(learnerWords(`Teach me verbs${gearNote(GEARS.test)}`), "Teach me verbs");
+assert.equal(learnerWords("Teach me\n\nStart by finding out what I already know."), "Teach me", "lessons from before notes had one shape");
+assert.equal(learnerWords("[rTutor: the learner answered your earlier question. They chose (x)]"), "", "a note alone has no words");
+assert.equal(learnerWords("a [bracket] stays"), "a [bracket] stays");
+assert.equal(gearOf(`x${gearNote(GEARS.scratch)}`), GEARS.scratch);
 
 /** Each subject has its own agent, started in the subject's folder when one of its lessons opens. */
 async function subjectFlow(browser, engine) {
@@ -175,7 +183,7 @@ async function agentFlow(browser, engine) {
   await emit({ type: "call", id: 30, agent: 7, lesson: 1, name: "ask", input: { question: "Next?", options: ["Ohm's law", "Power"] } });
   await emit({ type: "dropped", id: 30 });
   await page.locator(".card .opt", { hasText: "Power" }).click();
-  await page.waitForFunction(() => window.__state.sent.some((t) => t.includes("My answer to your earlier question") && t.includes("Power")));
+  await page.waitForFunction(() => window.__state.sent.some((t) => t.startsWith("[rTutor: the learner answered your earlier question") && t.includes("Power")));
   assert.ok(!(await page.evaluate(() => window.__state.results[30])), "no answer to a call that's gone");
   // an answered question settles: no box or Check button left, the answer stays as text
   assert.equal(await page.locator(".card.short input, .card.short button").count(), 0, "nothing left to check");

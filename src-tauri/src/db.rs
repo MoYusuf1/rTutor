@@ -268,6 +268,7 @@ fn add_lesson_columns(c: &Connection) -> rusqlite::Result<()> {
         ("folders", "notes", "TEXT NOT NULL DEFAULT ''"),
         ("lessons", "dir", "TEXT NOT NULL DEFAULT ''"),
         ("lessons", "phase", "TEXT NOT NULL DEFAULT ''"),
+        ("folders", "dir", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (table, col, decl) in added {
         let has: i64 = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [col], |r| r.get(0))?;
@@ -312,8 +313,15 @@ pub fn exec<P: Params>(c: &Connection, sql: &str, p: P) -> Res<usize> {
 
 /// Everything the sidebar shows, in one round trip.
 pub fn tree(c: &Connection) -> Res<Value> {
-    let folders = rows(c, "SELECT id, parent_id, name FROM folders ORDER BY name COLLATE NOCASE", [], |r| {
-        Ok(json!({ "id": r.get::<_, i64>(0)?, "parent": r.get::<_, Option<i64>>(1)?, "name": r.get::<_, String>(2)? }))
+    let folders = rows(c, "SELECT id, parent_id, name, dir FROM folders ORDER BY name COLLATE NOCASE", [], |r| {
+        let (parent, name, dir): (Option<i64>, String, String) = (r.get(1)?, r.get(2)?, r.get(3)?);
+        // each subject's folder on disk: where its agent runs
+        let dir = match parent {
+            None if dir.is_empty() => crate::material::subject_dir(&name).display().to_string(),
+            None => dir,
+            Some(_) => String::new(),
+        };
+        Ok(json!({ "id": r.get::<_, i64>(0)?, "parent": parent, "name": name, "dir": dir }))
     })?;
     let lessons = rows(c, "SELECT id, folder_id, title, bookmarked, updated FROM lessons ORDER BY updated DESC", [], |r| {
         Ok(json!({ "id": r.get::<_, i64>(0)?, "folder": r.get::<_, Option<i64>>(1)?, "title": r.get::<_, String>(2)?,
@@ -444,29 +452,55 @@ pub fn files_within(c: &Connection, folder: i64) -> Res<Vec<String>> {
     out
 }
 
-/// The subject (top-level folder) a lesson belongs to: its id, name and the tutor's notes on it.
-pub fn subject_of_lesson(c: &Connection, lesson: i64) -> Res<Option<(i64, String, String)>> {
+/// A subject (top-level folder): its name, the tutor's notes on it, and its own folder on disk. The folder is
+/// stored, made unique when the subject was created, so two subjects never share one (and a rename moves it).
+pub struct Subject {
+    pub id: i64,
+    pub name: String,
+    pub notes: String,
+    pub home: std::path::PathBuf,
+}
+
+fn subject_row(r: &rusqlite::Row) -> rusqlite::Result<Subject> {
+    let (name, dir): (String, String) = (r.get(1)?, r.get(3)?);
+    let home = if dir.is_empty() { crate::material::subject_dir(&name) } else { dir.into() };
+    Ok(Subject { id: r.get(0)?, name, notes: r.get(2)?, home })
+}
+
+/// The subject a lesson belongs to.
+pub fn subject_of_lesson(c: &Connection, lesson: i64) -> Res<Option<Subject>> {
     c.query_row(
         "WITH RECURSIVE up(id, parent) AS (SELECT f.id, f.parent_id FROM folders f JOIN lessons l ON l.folder_id = f.id WHERE l.id = ?1
            UNION ALL SELECT f.id, f.parent_id FROM folders f JOIN up ON f.id = up.parent)
-         SELECT f.id, f.name, f.notes FROM up JOIN folders f ON f.id = up.id WHERE up.parent IS NULL",
+         SELECT f.id, f.name, f.notes, f.dir FROM up JOIN folders f ON f.id = up.id WHERE up.parent IS NULL",
         [lesson],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        subject_row,
     )
     .optional()
     .map_err(err)
 }
 
-/// The top-level folder (the subject) that `folder` sits in.
-pub fn subject_of(c: &Connection, folder: i64) -> Res<String> {
+/// The subject that `folder` sits in (or is).
+pub fn subject_of(c: &Connection, folder: i64) -> Res<Subject> {
     c.query_row(
-        "WITH RECURSIVE up(id, parent, name) AS (SELECT id, parent_id, name FROM folders WHERE id = ?1
-           UNION ALL SELECT f.id, f.parent_id, f.name FROM folders f JOIN up ON f.id = up.parent)
-         SELECT name FROM up WHERE parent IS NULL",
+        "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_id FROM folders WHERE id = ?1
+           UNION ALL SELECT f.id, f.parent_id FROM folders f JOIN up ON f.id = up.parent)
+         SELECT f.id, f.name, f.notes, f.dir FROM up JOIN folders f ON f.id = up.id WHERE up.parent IS NULL",
         [folder],
-        |r| r.get(0),
+        subject_row,
     )
     .map_err(err)
+}
+
+/// Gives subject `id` a folder of its own if it has none yet: ~/rtutor/<name>, or "<name> (2)" when that's taken.
+pub fn give_home(c: &Connection, id: i64) -> Res<()> {
+    let (name, dir, top): (String, String, bool) = c.query_row("SELECT name, dir, parent_id IS NULL FROM folders WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)?;
+    if top && dir.is_empty() {
+        let home = crate::material::fresh_dir(&crate::material::library(), &name);
+        let _ = std::fs::create_dir_all(&home); // claimed on disk at once, so the next subject can't pick it too
+        exec(c, "UPDATE folders SET dir = ?2 WHERE id = ?1", params![id, home.display().to_string()])?;
+    }
+    Ok(())
 }
 
 /// True if `target` is `folder` itself or somewhere beneath it (moving `folder` there would make a loop).

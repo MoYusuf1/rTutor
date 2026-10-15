@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { $, el, store, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import { app, folderPath, materialsFor } from "./state.js";
-import { GEARS } from "./phases.js";
+import { GEARS, gearNote } from "./phases.js";
 import { confirmDialog } from "./dialogs.js";
 import { refresh, renderSidebar, unfold } from "./sidebar.js";
 import { leave, openSource, renderSources, show, showLesson } from "./lesson.js";
@@ -192,5 +192,5 @@ async function start() {
   app.lesson = { id, title, folder, state: "", sections: 0, phase: g.phase, last: null, toolResults: {} };
   showLesson();
   renderSidebar();
-  send(`${words}\n\n${g.tell}`, words); // the tutor gets the gear; the chat shows what the learner wrote
+  send(`${words}${gearNote(g)}`, words); // the tutor gets the gear; the chat shows what the learner wrote
 }

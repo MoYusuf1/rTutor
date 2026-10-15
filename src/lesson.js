@@ -48,8 +48,8 @@ export function showLesson() {
  *  question without one is still open and is asked again live. */
 function replay(m, toolResults, answered) {
   if (typeof m.content === "string") {
-    if (m.role === "user") say(learnerWords(m.content), "user");
-    else say(m.content);
+    const words = m.role === "user" ? learnerWords(m.content) : m.content;
+    if (words) say(words, m.role === "user" ? "user" : "bot"); // an app note alone (a late answer) has no words
     return;
   }
   if (m.role !== "assistant") return; // tool results: their answers show with their questions
