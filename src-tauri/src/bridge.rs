@@ -28,6 +28,11 @@ fn closed(stream: &TcpStream) -> bool {
 /// How long `next` waits before telling the agent to ask again. Below the tool timeouts rTutor sets up.
 const WAIT: Duration = Duration::from_secs(20 * 60);
 
+/// What `next` says, once a turn, to an agent that ends a step without giving the learner anything to do.
+const FINISH_STEP: &str = "Not yet: this step ended without anything for the learner to do, so they would be left \
+waiting. Finish it with one question on what you just taught (quiz, true_false or short_answer), or ask what they'd like \
+next, then call next.";
+
 pub struct Bridge {
     s: Mutex<S>,
     cv: Condvar,
@@ -55,7 +60,11 @@ struct Agent {
     #[serde(skip)]
     stopped: bool,
     #[serde(skip)]
-    unanswered: Option<(i64, String)>, // the last message it got, until it does something with it // the learner pressed stop: its next lesson tool call is refused
+    unanswered: Option<(i64, String)>, // the last message it got, until it does something with it
+    #[serde(skip)]
+    owes: bool, // it showed the learner something after its last question: the step isn't finished
+    #[serde(skip)]
+    reminded: bool, // it was told once this turn to finish the step with a question
     #[serde(skip)]
     lesson: i64, // the lesson its latest message came from; its tool calls apply there
     #[serde(skip)]
@@ -147,7 +156,7 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
             s.seq += 1;
             let id = s.seq;
             let text = |k: &str| hello[k].as_str().unwrap_or_default().to_owned();
-            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, lesson: 0, briefed: HashSet::new() });
+            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new() });
             if s.active.is_none() {
                 s.active = Some(id);
             }
@@ -197,11 +206,19 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
 }
 
 /// What `next` returns: how to teach (first time), the lesson so far (first time in this lesson), the message.
-fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, lesson: i64, text: &str) -> Result<String, String> {
+/// `switched`: the learner moved here from another lesson this agent teaches.
+fn compose<R: Runtime>(app: &AppHandle<R>, first: bool, new_lesson: bool, switched: bool, lesson: i64, text: &str) -> Result<String, String> {
     let mut out = String::new();
     if first {
         out.push_str(crate::PROMPT);
         out.push_str("\n\n---\n\n");
+    }
+    if switched {
+        // one agent teaches every lesson of its subject; without this it asks the learner which one to continue
+        out.push_str(&format!(
+            "[The learner is now in the lesson \"{}\". Teach this one. Don't ask which lesson to continue: the lesson you were on is saved and picks up when they go back to it.]\n\n",
+            crate::lesson_title(app, lesson)?
+        ));
     }
     if new_lesson {
         out.push_str(&crate::brief(app, lesson)?);
@@ -253,7 +270,13 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
             bridge.changed(&s);
             drop(s);
             // it may have missed the brief too, so it comes along again
-            return Ok((compose(app, true, true, lesson, &format!("(You may have missed this.) {text}"))?, None));
+            return Ok((compose(app, true, true, false, lesson, &format!("(You may have missed this.) {text}"))?, None));
+        }
+        // a step that ends on something to read, with nothing to do, leaves the learner waiting: send it back once
+        if a.owes && !a.reminded {
+            a.reminded = true;
+            note(format!("agent #{agent} ended a step without a question; reminded it"));
+            return Ok((FINISH_STEP.into(), None));
         }
         (a.busy, a.waiting, a.stopped) = (false, true, false);
         note(format!("agent #{agent} waiting for the learner"));
@@ -281,13 +304,20 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
         let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rTutor restarted. Call next again.")?;
         let first = a.briefed.is_empty();
         let new_lesson = a.briefed.insert(lesson);
+        let switched = a.lesson != 0 && a.lesson != lesson;
         (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some((lesson, text.clone())));
+        (a.owes, a.reminded) = (false, false); // the learner has the floor again
         bridge.changed(&s);
         drop(s);
-        return Ok((compose(app, first, new_lesson, lesson, &text)?, Some((lesson, text))));
+        return Ok((compose(app, first, new_lesson, switched, lesson, &text)?, Some((lesson, text))));
     }
     // a lesson tool: the page runs it and answers with a tool_result
     a.unanswered = None;
+    match tool {
+        "quiz" | "true_false" | "short_answer" | "ask" => a.owes = false,
+        "write_lesson" | "say" => a.owes = true,
+        _ => {}
+    }
     if a.stopped {
         return Err("The learner pressed stop. Drop what you were doing, don't send anything else, and call next to wait for them.".into());
     }
@@ -368,7 +398,7 @@ pub fn agent_stop(bridge: tauri::State<Bridge>, id: Option<u64>) {
     let keep: VecDeque<Item> = s.inbox.iter().filter(|i| s.owner(i) != agent).cloned().collect();
     s.inbox = keep;
     if let Some(a) = s.agents.iter_mut().find(|a| Some(a.id) == agent) {
-        (a.stopped, a.busy, a.unanswered) = (true, false, None);
+        (a.stopped, a.busy, a.unanswered, a.owes) = (true, false, None, false);
     }
     note("learner pressed stop");
     bridge.changed(&s);
@@ -447,7 +477,7 @@ mod tests {
     fn each_subject_goes_to_the_agent_running_in_its_folder() {
         let agent = |id: u64, cwd: &str| super::Agent {
             id, name: "codex".into(), cwd: cwd.into(), cmd: String::new(), busy: false, waiting: true, stopped: false,
-            unanswered: None, lesson: 0, briefed: HashSet::new(),
+            unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(),
         };
         let item = |dir: &str, own: bool| Item { lesson: 1, text: "hi".into(), dir: dir.into(), own };
         let mut s = S { agents: vec![agent(1, "/home/me/rtutor"), agent(2, "/home/me/rtutor/Somali")], active: Some(1), ..S::default() };
@@ -483,6 +513,33 @@ mod tests {
         let text = reply(agent.call("next"));
         assert!(text.ends_with("The learner says:\n\nHello, teach me"), "{text}");
         assert_eq!(history(&app), 1, "recorded once, when it was received");
+    }
+
+    #[test]
+    fn a_step_that_ends_without_a_question_is_sent_back_once() {
+        let (app, dir) = app("finish");
+        let agent = Agent::join(&dir);
+        send(&app, "Teach me greetings");
+        assert!(reply(agent.call("next")).contains("Teach me greetings"));
+        let _ = reply(agent.call("write_lesson")); // shows the learner something (no page here, so it errs; it still counts)
+        assert_eq!(reply(agent.call("next")), FINISH_STEP, "waiting now would leave the learner with nothing to do");
+        // reminded once: the next call waits for the learner as usual
+        send(&app, "ok");
+        assert!(reply(agent.call("next")).ends_with("The learner says:\n\nok"));
+    }
+
+    #[test]
+    fn an_agent_is_told_when_the_learner_switches_lessons() {
+        let (app, dir) = app("switch");
+        app.state::<crate::Store>().db().unwrap().execute_batch("INSERT INTO lessons (id, folder_id, title, updated) VALUES (2, 1, 'Numbers', 0);").unwrap();
+        let agent = Agent::join(&dir);
+        send(&app, "Teach me greetings");
+        let first = reply(agent.call("next"));
+        assert!(!first.contains("is now in the lesson"), "nothing to switch from yet");
+        let _ = reply(agent.call("phase")); // it acts on the message
+        agent_send(app.handle().clone(), app.state::<Bridge>(), 2, "Now numbers".into(), None).unwrap();
+        let text = reply(agent.call("next"));
+        assert!(text.contains(r#"is now in the lesson "Numbers""#) && text.contains("Don't ask which lesson"), "{text}");
     }
 
     #[test]

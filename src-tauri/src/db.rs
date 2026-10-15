@@ -219,20 +219,23 @@ pub fn tree(c: &Connection) -> Res<Value> {
     Ok(json!({ "folders": folders, "lessons": lessons, "sources": sources }))
 }
 
-pub fn messages(c: &Connection, lesson: i64) -> Res<Vec<Value>> {
+/// A lesson's history, each message with its stored (serialized) size, which the compaction budget uses.
+pub fn messages(c: &Connection, lesson: i64) -> Res<Vec<(Value, usize)>> {
     let mut q = c.prepare_cached("SELECT body FROM messages WHERE lesson_id = ?1 ORDER BY seq").map_err(err)?;
     let out = q
         .query_map([lesson], |r| r.get::<_, String>(0))
         .map_err(err)?
-        .map(|s| s.map_err(err).and_then(|s| serde_json::from_str(&s).map_err(err)))
+        .map(|s| s.map_err(err).and_then(|s| Ok((serde_json::from_str(&s).map_err(err)?, s.len()))))
         .collect();
     out
 }
 
-pub fn append_message(c: &Connection, lesson: i64, seq: usize, msg: &Value) -> Res<()> {
-    exec(c, "INSERT INTO messages (lesson_id, seq, body) VALUES (?1, ?2, ?3)", params![lesson, seq as i64, msg.to_string()])?;
+/// Stores one message and returns its serialized size (serialized once, for both).
+pub fn append_message(c: &Connection, lesson: i64, seq: usize, msg: &Value) -> Res<usize> {
+    let body = msg.to_string();
+    exec(c, "INSERT INTO messages (lesson_id, seq, body) VALUES (?1, ?2, ?3)", params![lesson, seq as i64, body])?;
     exec(c, "UPDATE lessons SET updated = ?2 WHERE id = ?1", params![lesson, now()])?;
-    Ok(())
+    Ok(body.len())
 }
 
 pub fn save_tool_result(c: &Connection, lesson: i64, result: &Value) -> Res<()> {
@@ -570,7 +573,7 @@ mod tests {
         )
         .unwrap();
         migrate(&c).unwrap();
-        assert_eq!(messages(&c, 1).unwrap()[0]["content"], "hi");
+        assert_eq!(messages(&c, 1).unwrap()[0].0["content"], "hi");
         assert_eq!(lesson(&c, 1).unwrap()["sections"][0], "# Old");
     }
 }

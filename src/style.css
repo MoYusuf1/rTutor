@@ -78,11 +78,6 @@ body:not(.collapsed) .floating { display: none; }
 .bar i { display: block; height: 100%; background: var(--accent); }
 .bar.warn i { background: var(--quiz); }
 .bar.full i { background: var(--bad); }
-#offer { padding: 12px; }
-#offer p { margin: 0 0 10px; font-size: 13px; }
-.offer-row { display: flex; gap: 6px; }
-.offer-row button { padding: 6px 10px; border-radius: 8px; font-size: 12.5px; }
-.offer-row button:not(.primary):hover { background: var(--hover); }
 /* bottom panel: terminals */
 #drawer { position: fixed; left: var(--side-w); right: 0; bottom: 0; height: var(--drawer-h); z-index: 4; display: flex; flex-direction: column; background: var(--sidebar); border-top: 1px solid var(--line); }
 body.collapsed #drawer { left: 0; }
@@ -278,7 +273,7 @@ body { margin: 0; display: flex; overflow: hidden; background: var(--bg); color:
 .who > span { font-weight: 550; font-size: 14.5px; }
 .who small { color: var(--muted); font-size: 12.5px; }
 .who small:empty { display: none; }
-#pop, #offer { position: absolute; z-index: 6; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); left: 10px; right: 10px; bottom: 70px; border-radius: 16px; padding: 8px; }
+#pop { position: absolute; z-index: 6; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); left: 10px; right: 10px; bottom: 70px; border-radius: 16px; padding: 8px; }
 .opt-row { flex: 1; min-width: 0; display: flex; align-items: center; width: 100%; text-align: left; padding: 10px; border-radius: 12px; gap: 12px; }
 #pop .act { width: 100%; color: var(--muted); font-size: 13px; height: 44px; }
 #menu { position: fixed; z-index: 20; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); min-width: 220px; padding: 6px; border-radius: 14px; }
@@ -360,7 +355,7 @@ dialog input { font-weight: 400; color: var(--text); background: var(--bg); bord
 #log-lines .bad { color: var(--bad); }
 #log-lines .good { color: var(--accent); }
 /* menus and popovers open with a little motion */
-#menu:not([hidden]), #pop:not([hidden]), #sources-pop:not([hidden]), #offer:not([hidden]) { animation: pop 0.14s ease-out; }
+#menu:not([hidden]), #pop:not([hidden]), #sources-pop:not([hidden]) { animation: pop 0.14s ease-out; }
 @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } }
 dialog[open] { animation: pop 0.16s ease-out; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
@@ -420,3 +415,13 @@ dialog[open] { animation: pop 0.16s ease-out; }
 .pomo-round { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0 2px; font-size: 13.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pomo-round .step { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-size: 15px; line-height: 1; }
 .pomo-round .step:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+
+/* no tutor yet: what to do about it, in the chat */
+.card.setup .q { font-weight: 500; }
+.setup-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.setup-row button { padding: 8px 14px; border-radius: 12px; font-size: 14px; border: 1px solid var(--line); }
+.setup-row button:not(.primary):hover { background: var(--hover); }
+/* a lesson shows at once and fills in when it arrives */
+#lesson.loading #canvas-body, #lesson.loading #log { opacity: 0.4; transition: opacity 0.2s; }
+/* where older parts of a long lesson load in as they are scrolled to */
+.more { height: 1px; }

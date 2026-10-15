@@ -193,6 +193,93 @@ async function agentFlow(browser, engine) {
   console.log(`${engine} UI passed: terminal agent drives the lesson, phase shortcuts, typed quiz answer, thinking state`);
 }
 
+/** What the learner saw stays as they saw it; long lessons open fast; no tutor means saying so, not pretending. */
+async function historyFlow(browser, engine) {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    const tool = (id, name, input) => ({ type: "tool_use", id, name, input });
+    const result = (id, content) => ({ role: "user", content: [{ type: "tool_result", tool_use_id: id, content }] });
+    const lessons = {
+      1: { title: "Greetings", folder: 1, state: "", sections: ["## Hello\nSalaan."], messages: [
+        { role: "user", content: "Teach me greetings\n\nStart by finding out what I already know." },
+        { role: "assistant", content: [tool("q1", "quiz", { question: "How do you say $x^2$ hello?", options: ["Nabad", "Salaan"], correct_index: 1, explanation: "" })] },
+        result("q1", "chose Salaan"),
+        { role: "assistant", content: [tool("a1", "ask", { question: "What next?", options: ["Numbers", "Colors"] })] },
+        result("a1", "answered"),
+        { role: "assistant", content: [tool("t1", "true_false", { statement: "Nabad means peace.", answer: true, explanation: "" })] },
+        result("t1", "skipped"),
+        { role: "user", content: "Explain more" },
+      ], toolResults: {
+        q1: { tool_use_id: "q1", content: "", answer: { i: 1, text: "because" } },
+        a1: { tool_use_id: "a1", content: "", answer: { i: -1, text: "Something else entirely" } },
+        t1: { tool_use_id: "t1", content: "", answer: { i: -1, text: "wait what is nabad", skipped: true } },
+      } },
+      2: { title: "Long", folder: 1, state: "", toolResults: {},
+        sections: Array.from({ length: 200 }, (_, i) => `## Part ${i + 1}\nText.`),
+        messages: Array.from({ length: 300 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `message ${i + 1}` })) },
+    };
+    window.__calls = [];
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      unregisterCallback: () => {},
+      invoke: async (command, args = {}) => {
+        window.__calls.push(command);
+        switch (command) {
+          case "get_settings": return { active: "agent", providers: {} };
+          case "tree": return { folders: [{ id: 1, parent: null, name: "Somali", dir: "" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }, { id: 2, folder: 1, title: "Long" }], sources: [] };
+          case "get_lesson": return structuredClone(lessons[args.id]);
+          case "mcp_command": return { bin: "/opt/rtutor", home: "/home/me" };
+          case "installed_agents": return ["claude"];
+          case "log_listen": return ["/tmp/rtutor.log", []];
+          case "rename_folder": window.__renamed = args.name; return;
+          case "create_lesson": return 3;
+          default: return;
+        }
+      },
+    };
+  });
+  await page.goto("http://localhost:1421");
+  // a double click on a subject renames it; it never starts a lesson
+  await page.locator("#tree .row.folder .label").dblclick();
+  await page.locator("#tree .row.folder input").fill("Af-Soomaali");
+  await page.locator("#tree .row.folder input").press("Enter");
+  await page.waitForFunction(() => window.__renamed === "Af-Soomaali");
+  assert.ok(!(await page.evaluate(() => window.__calls.includes("create_lesson"))), "renaming didn't start a lesson");
+  // reopening a lesson shows the chat as it was: what the learner wrote, picked, typed and skipped
+  await page.locator("#tree .row.lesson", { hasText: "Greetings" }).click(); // the subject unfolded when it was clicked
+  await page.locator(".msg.user").first().waitFor();
+  assert.equal(await page.locator(".msg.user").first().innerText(), "Teach me greetings", "the gear the app added isn't shown as the learner's words");
+  const quiz = page.locator(".card.quiz.answered").first();
+  assert.match(await quiz.locator(".opt.picked").innerText(), /Salaan/);
+  assert.equal(await quiz.locator(".opt.right").count(), 1);
+  assert.equal(await quiz.locator(".q .katex").count(), 1, "math in a replayed question renders");
+  await quiz.locator(".given").getByText("Your note: because").waitFor();
+  await page.locator(".msg.user").getByText("Something else entirely").waitFor();
+  await page.locator(".card.answered .given").getByText("Skipped").waitFor();
+  await page.locator(".msg.user").getByText("wait what is nabad").waitFor();
+  assert.equal(await page.locator(".meta").count(), 0, "no one-line stand-ins for questions");
+  // a long lesson renders its newest parts, and older ones as they're scrolled to
+  await page.locator("#tree .row.lesson", { hasText: "Long" }).click();
+  await page.locator("#canvas-body").getByText("Part 200").waitFor();
+  const parts = () => page.locator("#canvas-body > .md").count();
+  assert.ok((await parts()) <= 20, `only the newest sections render at first (${await parts()})`);
+  assert.ok((await page.locator("#log .msg").count()) <= 40, "only the newest messages render at first");
+  await page.locator("#canvas").evaluate((c) => (c.scrollTop = 0));
+  await page.waitForFunction(() => document.querySelectorAll("#canvas-body > .md").length > 20);
+  // no tutor running: the chat says so and offers to start one, instead of a pretend "Thinking…"
+  await page.locator("#tree .row.folder .label").click();
+  await page.locator("#start-input").fill("Numbers");
+  await page.locator("#start-btn").click();
+  await page.locator(".card.setup").getByText("Start Claude Code").waitFor();
+  assert.equal(await page.locator(".work").count(), 0, "nothing pretends to think");
+  assert.deepEqual(errors, []);
+  await page.close();
+  console.log(`${engine} UI passed: rename by double click, chat replay, long lessons load lazily, no tutor said plainly`);
+}
+
 // Exercise the real UI with deterministic IPC replies. Live Rust tests cover provider transport.
 const server = await createServer({ server: { port: 1421, strictPort: true } });
 await server.listen();
@@ -327,6 +414,7 @@ for (const engine of (process.env.UI_BROWSERS || "chromium").split(",")) {
   }
   await agentFlow(browser, engine);
   await subjectFlow(browser, engine);
+  await historyFlow(browser, engine);
   } finally {
     await browser.close();
   }

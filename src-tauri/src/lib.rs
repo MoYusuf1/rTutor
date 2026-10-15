@@ -32,12 +32,13 @@ struct Open {
 }
 
 impl Open {
-    fn load(lesson: i64, messages: Vec<Value>) -> Self {
-        let lens = messages.iter().map(|m| m.to_string().len()).collect();
+    /// `messages` come with their stored sizes, so nothing is serialized again to measure them.
+    fn load(lesson: i64, messages: Vec<(Value, usize)>) -> Self {
+        let (messages, lens) = messages.into_iter().unzip();
         Open { lesson, messages: Arc::new(messages), lens, system: None }
     }
-    fn push(&mut self, msg: Value) {
-        self.lens.push(msg.to_string().len());
+    fn push(&mut self, msg: Value, len: usize) {
+        self.lens.push(len);
         Arc::make_mut(&mut self.messages).push(msg);
     }
 }
@@ -254,14 +255,19 @@ fn brief<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<Strin
     Ok(s)
 }
 
+/// A lesson's title, without loading the lesson.
+fn lesson_title<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Res<String> {
+    app.state::<Store>().db()?.query_row("SELECT title FROM lessons WHERE id = ?1", [lesson], |r| r.get(0)).map_err(err)
+}
+
 /// Appends a terminal agent's turn to the lesson history, which the page and API providers read back.
 fn record<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msg: Value) -> Res<()> {
     let store = app.state::<Store>();
     let c = store.db()?;
     let mut o = store.open.lock().map_err(err)?;
     if o.lesson == lesson {
-        db::append_message(&c, lesson, o.messages.len(), &msg)?;
-        o.push(msg);
+        let len = db::append_message(&c, lesson, o.messages.len(), &msg)?;
+        o.push(msg, len);
     } else {
         db::append_message(&c, lesson, db::next_seq(&c, lesson)?, &msg)?;
     }
@@ -297,8 +303,8 @@ async fn send(
                 };
             }
             let msg = json!({ "role": "user", "content": content });
-            db::append_message(&c, lesson, o.messages.len(), &msg)?;
-            o.push(msg);
+            let len = db::append_message(&c, lesson, o.messages.len(), &msg)?;
+            o.push(msg, len);
         }
         if o.system.is_none() {
             o.system = Some(system_prompt(&c, lesson)?.into());
@@ -359,8 +365,8 @@ async fn send(
     db::record_turn(&c, lesson, &provider.id, &reply.usage)?;
     let mut o = store.open.lock().map_err(err)?;
     if o.lesson == lesson {
-        db::append_message(&c, lesson, o.messages.len(), &msg)?;
-        o.push(msg);
+        let len = db::append_message(&c, lesson, o.messages.len(), &msg)?;
+        o.push(msg, len);
     } else {
         db::append_message(&c, lesson, db::next_seq(&c, lesson)?, &msg)?; // learner switched lessons mid-turn
     }

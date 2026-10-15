@@ -235,17 +235,20 @@ async fn sse(resp: reqwest::Response, mut on: impl FnMut(&str) -> Result<bool, S
     }
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let mut scanned: usize = 0; // bytes already searched for an event end, so each byte is looked at once
     while let Some(chunk) = stream.next().await {
-        buf.extend_from_slice(&chunk.map_err(|e| e.to_string())?);
-        buf.retain(|&b| b != b'\r');
-        while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-            let event: Vec<u8> = buf.drain(..pos + 2).collect();
-            let event = String::from_utf8_lossy(&event);
+        buf.extend(chunk.map_err(|e| e.to_string())?.iter().filter(|&&b| b != b'\r'));
+        while let Some(pos) = buf[scanned.saturating_sub(1)..].windows(2).position(|w| w == b"\n\n") {
+            let end = scanned.saturating_sub(1) + pos + 2;
+            let event = String::from_utf8_lossy(&buf[..end]).into_owned();
+            buf.drain(..end);
+            scanned = 0;
             let data: Vec<&str> = event.lines().filter_map(|l| l.strip_prefix("data:")).map(str::trim_start).collect();
             if !data.is_empty() && on(&data.join("\n"))? {
                 return Ok(());
             }
         }
+        scanned = buf.len();
     }
     Ok(())
 }
