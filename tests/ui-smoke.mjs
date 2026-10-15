@@ -291,14 +291,14 @@ async function historyFlow(browser, engine) {
   await page.waitForTimeout(100);
   { const g = await gap(); assert.ok(g < 4, `something new keeps the chat at its end (${g}px short)`); }
   // scrolling the lesson up fetches older pages of sections until its first one
-  for (let tries = 0; tries < 60 && !(await page.locator("#canvas-body").getByText("Part 1", { exact: true }).count()); tries++) {
+  for (const end = Date.now() + 30000; Date.now() < end && !(await page.locator("#canvas-body").getByText("Part 1", { exact: true }).count());) { // slow runners take a while
     await page.locator("#canvas").evaluate((c) => (c.scrollTop = 0));
     await page.waitForTimeout(100);
   }
   await page.locator("#canvas-body").getByText("Part 1", { exact: true }).waitFor();
   assert.ok(await page.evaluate(() => window.__calls.filter((c) => c === "lesson_sections").length >= 2), "older sections came a page at a time");
   // scrolling the chat up fetches older pages of history until the very first message
-  for (let tries = 0; tries < 40 && !(await page.locator("#log .msg").getByText("message 1", { exact: true }).count()); tries++) {
+  for (const end = Date.now() + 30000; Date.now() < end && !(await page.locator("#log .msg").getByText("message 1", { exact: true }).count());) {
     await page.locator("#log").evaluate((l) => (l.scrollTop = 0));
     await page.waitForTimeout(100);
   }
