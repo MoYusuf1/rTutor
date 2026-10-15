@@ -207,14 +207,21 @@ async function runTool(call) {
   return result;
 }
 
+const MAX_ROUNDS = 25; // model calls per learner message
+
 /** `first`: the learner's message; undefined continues with pending tool calls. */
 async function runLoop(first) {
   const mine = app.gen;
   const me = app.lesson;
   busy = me.id;
   let content = first;
+  let rounds = 0; // a model that keeps calling tools would otherwise spend tokens without end
   try {
     for (;;) {
+      if (++rounds > MAX_ROUNDS) {
+        note("The tutor took too many steps in a row, so it was stopped. Send a message to carry on.");
+        break;
+      }
       if (content === undefined) {
         const calls = pendingCalls();
         if (!calls.length) break;

@@ -263,9 +263,29 @@ const COMPACTION: &str = "Summarize this tutoring session for the tutor who cont
 lesson state (the latest update_state call) word for word. Then add what happened after it: nodes taught, quiz results and the \
 learner's notes, open questions, and exactly where the lesson stopped. Keep it factual and specific; it replaces the turns above.";
 
-fn compacts(model: &str) -> bool {
+pub(crate) fn compacts(model: &str) -> bool {
     starts(model, &["claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
                     "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5"])
+}
+
+/// The most output tokens a model takes. Older models reject more than their limit; newer ones take 64k.
+fn max_out(model: &str) -> u64 {
+    if starts(model, &["claude-3-opus", "claude-3-haiku", "claude-3-sonnet"]) {
+        4096
+    } else if starts(model, &["claude-3-5"]) {
+        8192
+    } else if starts(model, &["claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-2025"]) {
+        32_000
+    } else {
+        64_000
+    }
+}
+
+/// The limit named in an API error such as "max_tokens: 64000 > 32000, which is the maximum allowed…".
+fn output_limit(error: &str) -> Option<u64> {
+    let rest = &error[error.find("max_tokens")?..];
+    let rest = &rest[rest.find("> ")? + 2..];
+    rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok().filter(|&n| n > 0)
 }
 
 async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str, messages: &[Value], ch: &Channel<Event>, acc: &mut Acc) -> Result<(), String> {
@@ -296,8 +316,9 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
         .collect();
 
     let mut body = json!({
-        "model": p.model, "max_tokens": 64000, "stream": true,
-        "system": system, "messages": messages, "cache_control": { "type": "ephemeral" },
+        "model": p.model, "max_tokens": max_out(&p.model), "stream": true,
+        // a learner often thinks (or takes a quiz) for more than the default 5 minutes: an hour keeps the prefix cached
+        "system": system, "messages": messages, "cache_control": { "type": "ephemeral", "ttl": "1h" },
     });
     if modern {
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
@@ -307,10 +328,6 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
     body["tools"] = json!(tools);
 
     let base = if p.base_url.is_empty() { "https://api.anthropic.com" } else { p.base_url.trim_end_matches('/') };
-    let mut req = http
-        .post(format!("{base}/v1/messages"))
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01");
     let mut betas = vec![];
     if fallbacks {
         // on a safety decline the API retries on Anthropic's recommended model, inside the same stream
@@ -322,12 +339,25 @@ async fn anthropic(http: &reqwest::Client, p: &Provider, key: &str, system: &str
         body["context_management"] = json!({ "edits": [{ "type": "compact_20260112", "instructions": COMPACTION }] });
         betas.push("compact-2026-01-12");
     }
-    if !betas.is_empty() {
-        req = req.header("anthropic-beta", betas.join(","));
-    }
+    let post = |body: &Value| {
+        let mut req = http.post(format!("{base}/v1/messages")).header("x-api-key", key).header("anthropic-version", "2023-06-01");
+        if !betas.is_empty() {
+            req = req.header("anthropic-beta", betas.join(","));
+        }
+        req.json(body).send()
+    };
     crate::log::note(format!("POST {base}/v1/messages  model={}  messages={}", p.model, messages.len()));
-    let resp = req.json(&body).send().await.map_err(|e| e.to_string())?;
+    let mut resp = post(&body).await.map_err(|e| e.to_string())?;
     crate::log::note(format!("HTTP {}", resp.status()));
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        // a model rTutor doesn't know with a lower output limit: the error names it, so ask again within it
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let Some(limit) = output_limit(&text) else { return Err(api_error(status, &text)) };
+        crate::log::note(format!("api   {} takes at most {limit} output tokens; asking again", p.model));
+        body["max_tokens"] = json!(limit);
+        resp = post(&body).await.map_err(|e| e.to_string())?;
+    }
 
     let streamed = sse(resp, |data| {
         let v: Value = serde_json::from_str(data).map_err(|e| e.to_string())?;
@@ -536,6 +566,16 @@ async fn openai(http: &reqwest::Client, p: &Provider, key: &str, system: &str, m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_limits() {
+        assert_eq!(super::max_out("claude-3-5-haiku-latest"), 8192);
+        assert_eq!(super::max_out("claude-opus-4-1-20250805"), 32_000);
+        assert_eq!(super::max_out("claude-opus-5-5"), 64_000);
+        let e = "max_tokens: 64000 > 32000, which is the maximum allowed number of output tokens for claude-opus-4-20250514";
+        assert_eq!(super::output_limit(e), Some(32_000));
+        assert_eq!(super::output_limit("messages: at least one message is required"), None);
+    }
 
     #[test]
     fn converts_history_to_openai() {

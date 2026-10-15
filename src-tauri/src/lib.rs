@@ -17,7 +17,7 @@ const PROMPT: &str = include_str!("../prompts/teach.md");
 
 struct Store {
     db: Mutex<Connection>,
-    open: Mutex<Open>,
+    open: Mutex<Opens>,
     http: reqwest::Client, // one pooled client: connections are reused across turns
     stops: Mutex<std::collections::HashMap<i64, futures_util::future::AbortHandle>>, // running API turns, by lesson
     // material read from files, waiting to be added: the page holds only a token, never the text (a book is
@@ -32,6 +32,31 @@ struct Open {
     messages: Arc<Vec<Value>>,
     lens: Vec<usize>, // serialized size of each message, for the compaction budget
     system: Option<Arc<str>>,
+}
+
+/// The lessons being taught, most recent last. A few, so two lessons running turns at once don't reload each
+/// other's whole history every turn.
+#[derive(Default)]
+struct Opens(Vec<Open>);
+
+impl Opens {
+    const KEEP: usize = 3;
+    fn get(&mut self, lesson: i64) -> Option<&mut Open> {
+        self.0.iter_mut().find(|o| o.lesson == lesson)
+    }
+    /// The lesson's history, loaded (dropping the least recently used) if it isn't here yet.
+    fn load(&mut self, lesson: i64, messages: impl FnOnce() -> Res<Vec<(Value, usize)>>) -> Res<&mut Open> {
+        if let Some(i) = self.0.iter().position(|o| o.lesson == lesson) {
+            let o = self.0.remove(i);
+            self.0.push(o);
+        } else {
+            if self.0.len() >= Self::KEEP {
+                self.0.remove(0);
+            }
+            self.0.push(Open::load(lesson, messages()?));
+        }
+        Ok(self.0.last_mut().expect("just pushed"))
+    }
 }
 
 impl Open {
@@ -81,11 +106,9 @@ impl Store {
     }
     /// Sources changed or a lesson was deleted: rebuild the prompt / history on next use.
     fn forget(&self, lesson: Option<i64>) {
-        if let Ok(mut o) = self.open.lock() {
-            o.system = None;
-            if lesson.map_or(false, |l| l == o.lesson) {
-                *o = Open::default();
-            }
+        if let Ok(mut opens) = self.open.lock() {
+            opens.0.retain(|o| Some(o.lesson) != lesson);
+            opens.0.iter_mut().for_each(|o| o.system = None);
         }
     }
 }
@@ -302,9 +325,10 @@ fn record<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msg: Value)
 fn record_all<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msgs: Vec<Value>) -> Res<()> {
     let store = app.state::<Store>();
     let c = store.db()?;
-    let mut o = store.open.lock().map_err(err)?;
+    let mut opens = store.open.lock().map_err(err)?;
+    let mut o = opens.get(lesson);
     let tx = c.unchecked_transaction().map_err(err)?;
-    let mut seq = if o.lesson == lesson { o.messages.len() } else { db::next_seq(&tx, lesson)? };
+    let mut seq = match &o { Some(o) => o.messages.len(), None => db::next_seq(&tx, lesson)? };
     let mut stored = Vec::with_capacity(msgs.len());
     for msg in msgs {
         let len = db::append_message(&tx, lesson, seq, &msg)?;
@@ -312,7 +336,7 @@ fn record_all<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msgs: V
         seq += 1;
     }
     tx.commit().map_err(err)?;
-    if o.lesson == lesson {
+    if let Some(o) = o.as_mut() {
         for (msg, len) in stored {
             o.push(msg, len);
         }
@@ -332,10 +356,8 @@ async fn send(
     let key = provider_key(&provider)?;
     let (messages, system, from) = {
         let c = store.db()?;
-        let mut o = store.open.lock().map_err(err)?;
-        if o.lesson != lesson {
-            *o = Open::load(lesson, db::messages(&c, lesson)?);
-        }
+        let mut opens = store.open.lock().map_err(err)?;
+        let o = opens.load(lesson, || db::messages(&c, lesson))?;
         if let Some(mut content) = content {
             // a different provider than last turn: tell it to continue, not start over
             if db::last_provider(&c, lesson)?.is_some_and(|prev| prev != provider.id) {
@@ -358,7 +380,8 @@ async fn send(
         // Anthropic summarizes long histories on its servers. For the others rTutor cuts old turns and puts the
         // tutor's own lesson state in their place, which the database still has in full.
         let mut k = db::compaction(&c, lesson)?;
-        if provider.kind != "anthropic" {
+        let server_compacts = provider.kind == "anthropic" && llm::compacts(&provider.model);
+        if !server_compacts {
             let cut = cut_point(&o.messages, &o.lens, k.from.min(o.messages.len().saturating_sub(1)));
             if cut > k.from && !k.state.is_empty() {
                 (k.from, k.snapshot) = (cut, k.state.clone());
@@ -366,7 +389,7 @@ async fn send(
             }
         }
         let base = o.system.clone().unwrap_or_default();
-        let (from, system) = if provider.kind == "anthropic" || k.from == 0 {
+        let (from, system) = if server_compacts || k.from == 0 {
             (0, base)
         } else {
             let section = format!(
@@ -409,8 +432,8 @@ async fn send(
     let msg = json!({ "role": "assistant", "content": reply.content });
     let c = store.db()?;
     db::record_turn(&c, lesson, &provider.id, &reply.usage)?;
-    let mut o = store.open.lock().map_err(err)?;
-    if o.lesson == lesson {
+    let mut opens = store.open.lock().map_err(err)?;
+    if let Some(o) = opens.get(lesson) {
         let len = db::append_message(&c, lesson, o.messages.len(), &msg)?;
         o.push(msg, len);
     } else {
@@ -632,7 +655,7 @@ fn delete_folder(store: State<Store>, id: i64) -> Res<()> {
     material::remove_files(&files);
     drop(c);
     store.forget(None);
-    *store.open.lock().map_err(err)? = Open::default();
+    *store.open.lock().map_err(err)? = Opens::default();
     Ok(())
 }
 
@@ -931,6 +954,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod contents_tests {
+    #[test]
+    fn two_lessons_taught_at_once_keep_their_histories() {
+        let mut opens = super::Opens::default();
+        let mut loads = 0;
+        for lesson in [1, 2, 1, 2, 3, 1, 4, 2] {
+            opens.load(lesson, || { loads += 1; Ok(vec![]) }).unwrap();
+        }
+        // 1, 2 and 3 load once each; 4 pushes out 2 (the least recent), which loads again
+        assert_eq!(loads, 5);
+        assert_eq!(opens.0.iter().map(|o| o.lesson).collect::<Vec<_>>(), [1, 4, 2]);
+    }
+
     #[test]
     fn a_long_book_is_listed_in_ranges() {
         let short: Vec<String> = (1..=3).map(|i| format!("Part {i}")).collect();
