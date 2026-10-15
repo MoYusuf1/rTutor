@@ -46,6 +46,7 @@ export function md(src, final = true) {
 }
 
 let mermaidLib;
+let mermaidPalette = "";
 export async function drawDiagrams(node) {
   const nodes = node.querySelectorAll(".mermaid");
   if (!nodes.length) return;
@@ -57,10 +58,12 @@ export async function drawDiagrams(node) {
     });
     mermaidLib = globalThis.mermaid;
   }
-  {
-    // read the palette on every draw so diagrams follow a light/dark switch
-    const css = getComputedStyle(document.documentElement);
-    const v = (name) => css.getPropertyValue(name).trim();
+  // set up once per palette (not per diagram), so diagrams still follow a light/dark switch
+  const css = getComputedStyle(document.documentElement);
+  const v = (name) => css.getPropertyValue(name).trim();
+  const palette = ["--bg", "--surface", "--text", "--accent", "--sidebar", "--muted"].map(v).join();
+  if (palette !== mermaidPalette) {
+    mermaidPalette = palette;
     mermaidLib.initialize({
       startOnLoad: false,
       theme: "base",

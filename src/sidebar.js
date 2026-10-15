@@ -218,8 +218,9 @@ $("#search-input").oninput = () => {
   setSearch(true);
   searchTimer = setTimeout(async () => {
     const mine = ++searchSeq;
-    const hits = await invoke("search", { query: $("#search-input").value });
+    const hits = await invoke("search", { query: $("#search-input").value }).catch(() => []);
     if (mine !== searchSeq) return;
+    if (!hits.length) return $("#results").replaceChildren(el("div", "hit none", "No matches"));
     $("#results").replaceChildren(
       ...hits.map((h) => {
         const d = el("div", "hit");

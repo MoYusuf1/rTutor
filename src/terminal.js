@@ -4,6 +4,7 @@ import { $, el, store } from "./dom.js";
 import { icon, logo, agentLook } from "./icons.js";
 import { app, saveSettings, short, subjectDir } from "./state.js";
 import { agents } from "./agents.js";
+import { confirmDialog } from "./dialogs.js";
 
 const drawer = $("#drawer");
 export const tabs = []; // { id, cwd, term, fit, el, hint }
@@ -11,12 +12,13 @@ let current = null;
 let nextTab = 1;
 const launched = new Map(); // folder → the agent command rTutor typed there
 let mcpBin = "";
+let mcpConfig = ""; // a file holding Claude Code's MCP config
 let home = "";
 export let installed = []; // coding agents found on this computer
 
 /** Reads what the drawer needs from the app: the MCP binary, the home folder, the agents installed. */
 export async function initTerminal() {
-  ({ bin: mcpBin, home } = await invoke("mcp_command").catch(() => ({ bin: "rtutor", home: "" })));
+  ({ bin: mcpBin, home, config: mcpConfig = "" } = await invoke("mcp_command").catch(() => ({ bin: "rtutor", home: "" })));
   installed = await invoke("installed_agents").catch(() => []);
 }
 
@@ -34,18 +36,19 @@ const library = () => (home ? `${home}${home.includes("\\") ? "\\" : "/"}rtutor`
  *  the learner's own hooks, plugins, skills or other MCP servers, and no shell. That keeps the tutor's behavior
  *  the same on every machine and halves its fixed context (23k → 11k tokens measured), which every call re-reads. */
 export function quickStarts() {
-  const bin = mcpBin.replace(/'/g, "");
+  // double quotes and TOML literal ('single-quoted') strings read the same in bash, fish, zsh, PowerShell and cmd
+  const bin = mcpBin.replace(/['"]/g, "");
+  const config = mcpConfig.replace(/"/g, "");
   // model and effort as picked when starting it; blank means the agent's own default
   const pick = (kind) => app.settings.agentPrefs?.[kind] ?? {};
   const safe = (v) => (v && /^[\w.:\[\]-]+$/.test(v) ? v : ""); // model names and aliases only; quoted below
   const cm = safe(pick("claude").model), ce = safe(pick("claude").effort);
   const xm = safe(pick("codex").model), xe = safe(pick("codex").effort);
-  const json = JSON.stringify({ mcpServers: { rtutor: { command: bin, args: ["--mcp"] } } });
-  const go = "'Call the rTutor next tool now and tutor through it.'";
+  const go = '"Call the rTutor next tool now and tutor through it."';
   return {
     // the prompt goes first: --mcp-config and --allowedTools take every word after them
-    claude: ["Claude Code", "claude", `env MCP_TOOL_TIMEOUT=1800000 claude ${go}${cm ? ` --model '${cm}'` : ""}${ce ? ` --effort ${ce}` : ""} --restricted --strict-mcp-config --disable-slash-commands --mcp-config '${json}' --allowedTools mcp__rtutor`],
-    codex: ["Codex", "openai", `codex${xm ? ` -m '${xm}'` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c 'mcp_servers.rtutor.command="${bin}"' -c 'mcp_servers.rtutor.args=["--mcp"]' -c mcp_servers.rtutor.tool_timeout_sec=1800 -c 'mcp_servers.rtutor.default_tools_approval_mode="approve"' ${go}`],
+    claude: ["Claude Code", "claude", `claude ${go}${cm ? ` --model "${cm}"` : ""}${ce ? ` --effort ${ce}` : ""} --restricted --strict-mcp-config --disable-slash-commands --mcp-config "${config}" --allowedTools mcp__rtutor`],
+    codex: ["Codex", "openai", `codex${xm ? ` -m "${xm}"` : ""}${xe ? ` -c model_reasoning_effort=${xe}` : ""} -c "mcp_servers.rtutor.command='${bin}'" -c "mcp_servers.rtutor.args=['--mcp']" -c mcp_servers.rtutor.tool_timeout_sec=1800 -c "mcp_servers.rtutor.default_tools_approval_mode='approve'" ${go}`],
   };
 }
 
@@ -239,7 +242,12 @@ export function renderTabs() {
       const x = el("button", "", "");
       x.innerHTML = icon("x", 14);
       x.title = "Close terminal";
-      x.onclick = (e) => { e.stopPropagation(); closeTab(t); };
+      x.onclick = async (e) => {
+        e.stopPropagation();
+        // closing a terminal ends the agent in it: ask first, since that stops the tutoring too
+        if (a && !(await confirmDialog([`Stop ${agentLook(a.name).label}?`, "Closing this terminal ends the tutor running in it.", "Close"]))) return;
+        closeTab(t);
+      };
       b.append(x);
       return b;
     }),

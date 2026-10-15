@@ -194,6 +194,7 @@ export function useAgent(id) {
   invoke("agent_use", { id });
 }
 
+let agentShape = "";
 const events = new Channel();
 events.onmessage = async (e) => {
   if (e.type === "agents") {
@@ -205,8 +206,12 @@ events.onmessage = async (e) => {
     refreshWork();
     setWorking();
     showWho();
-    renderTabs();
+    // which agents run where changes rarely; busy flips on every turn and needs only the lines above
+    const shape = agents.map((a) => `${a.id}\t${a.cwd}`).join("\n");
     if (!$("#pop").hidden) renderPop();
+    if (shape === agentShape) return;
+    agentShape = shape;
+    renderTabs();
     if (!$("#start").hidden) renderStart();
   } else if (e.type === "call") {
     const to = app.lesson?.id === e.lesson ? app.lesson : { id: e.lesson, sections: 1, state: "" };

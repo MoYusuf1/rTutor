@@ -145,11 +145,102 @@ fn subjects(c: &Connection) -> rusqlite::Result<()> {
 }
 
 pub fn add_parts(c: &Connection, source: i64, body: &str) -> rusqlite::Result<()> {
+    insert_parts(c, source, &crate::material::chunk(body))
+}
+
+/// Stores parts already split (splitting a book is slow; callers do it before taking the database lock).
+pub fn insert_parts(c: &Connection, source: i64, parts: &[(String, String)]) -> rusqlite::Result<()> {
     let mut q = c.prepare_cached("INSERT INTO parts (source_id, seq, label, body) VALUES (?1, ?2, ?3, ?4)")?;
-    for (seq, (label, text)) in crate::material::chunk(body).into_iter().enumerate() {
+    for (seq, (label, text)) in parts.iter().enumerate() {
         q.execute(params![source, seq as i64 + 1, label, text])?;
     }
     Ok(())
+}
+
+// ---------- a lesson a page at a time: opening one costs the same however long it has grown ----------
+
+/// Up to `limit` messages before `before` (a seq; None for the newest), oldest first, each with its seq.
+pub fn messages_page(c: &Connection, lesson: i64, before: Option<i64>, limit: usize) -> Res<Vec<(i64, Value)>> {
+    let mut q = c
+        .prepare_cached("SELECT seq, body FROM messages WHERE lesson_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3")
+        .map_err(err)?;
+    let mut page: Vec<(i64, Value)> = q
+        .query_map(params![lesson, before.unwrap_or(i64::MAX), limit as i64], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))
+        .map_err(err)?
+        .map(|row| row.map_err(err).and_then(|(seq, body)| Ok((seq, serde_json::from_str(&body).map_err(err)?))))
+        .collect::<Res<_>>()?;
+    page.reverse();
+    Ok(page)
+}
+
+/// Up to `limit` canvas sections before section `before` (None for the newest), oldest first, each with its id.
+pub fn sections_page(c: &Connection, lesson: i64, before: Option<i64>, limit: usize) -> Res<Vec<(i64, String)>> {
+    let mut q = c
+        .prepare_cached("SELECT id, markdown FROM sections WHERE lesson_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3")
+        .map_err(err)?;
+    let mut page: Vec<(i64, String)> = q
+        .query_map(params![lesson, before.unwrap_or(i64::MAX), limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    page.reverse();
+    Ok(page)
+}
+
+/// The saved results of these tool calls (the ones a page of history shows).
+pub fn tool_results_for(c: &Connection, lesson: i64, ids: &[&str]) -> Res<Value> {
+    let mut out = serde_json::Map::new();
+    let mut q = c.prepare_cached("SELECT body FROM tool_results WHERE lesson_id = ?1 AND tool_id = ?2").map_err(err)?;
+    for id in ids {
+        if let Some(body) = q.query_row(params![lesson, id], |r| r.get::<_, String>(0)).optional().map_err(err)? {
+            out.insert((*id).to_owned(), serde_json::from_str(&body).map_err(err)?);
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// The ids of the tool calls in some messages.
+pub fn tool_ids(messages: &[(i64, Value)]) -> Vec<&str> {
+    messages
+        .iter()
+        .flat_map(|(_, m)| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "tool_use")
+        .filter_map(|b| b["id"].as_str())
+        .collect()
+}
+
+/// The phase the tutor last reported: one indexed lookup of the newest message that mentions it, not a history scan.
+pub fn last_phase(c: &Connection, lesson: i64) -> Res<Value> {
+    let body: Option<String> = c
+        .query_row(
+            "SELECT body FROM messages WHERE lesson_id = ?1 AND instr(body, '\"name\":\"phase\"') > 0 ORDER BY seq DESC LIMIT 1",
+            [lesson],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(err)?;
+    let m: Value = body.and_then(|b| serde_json::from_str(&b).ok()).unwrap_or_default();
+    Ok(m["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|b| b["type"] == "tool_use" && b["name"] == "phase")
+        .map_or(Value::Null, |b| b["input"]["phase"].clone()))
+}
+
+/// The lesson's first message (how it began: its gear), and its first section (whether it titles the lesson).
+pub fn firsts(c: &Connection, lesson: i64) -> Res<(Value, Option<String>)> {
+    let opener: Option<String> = c
+        .query_row("SELECT body FROM messages WHERE lesson_id = ?1 ORDER BY seq LIMIT 1", [lesson], |r| r.get(0))
+        .optional()
+        .map_err(err)?;
+    let first: Option<String> = c
+        .query_row("SELECT markdown FROM sections WHERE lesson_id = ?1 ORDER BY id LIMIT 1", [lesson], |r| r.get(0))
+        .optional()
+        .map_err(err)?;
+    let opener = opener.and_then(|b| serde_json::from_str::<Value>(&b).ok()).map_or(Value::Null, |m| m["content"].clone());
+    Ok((opener, first))
 }
 
 /// Columns added in place to databases created before them.
@@ -244,6 +335,7 @@ pub fn save_tool_result(c: &Connection, lesson: i64, result: &Value) -> Res<()> 
     Ok(())
 }
 
+#[cfg(test)]
 pub fn tool_results(c: &Connection, lesson: i64) -> Res<Value> {
     let mut out = serde_json::Map::new();
     let mut q = c.prepare("SELECT tool_id, body FROM tool_results WHERE lesson_id = ?1").map_err(err)?;
@@ -473,6 +565,31 @@ mod tests {
         .unwrap();
         let names: Vec<String> = sources_for(&c, 1).unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["top", "mid", "own"]);
+    }
+
+    #[test]
+    fn a_lesson_is_read_a_page_at_a_time() {
+        let c = mem();
+        c.execute("INSERT INTO lessons (id, title, updated) VALUES (1, 'Long', 0)", []).unwrap();
+        for i in 0..300 {
+            let m = if i == 0 { json!({ "role": "user", "content": "Teach me" }) }
+                else if i == 150 { json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "p", "name": "phase", "input": { "phase": "teach" } }] }) }
+                else { json!({ "role": "user", "content": format!("m{i}") }) };
+            append_message(&c, 1, i, &m).unwrap();
+        }
+        for i in 0..100 {
+            c.execute("INSERT INTO sections (lesson_id, markdown) VALUES (1, ?1)", [format!("## Part {i}")]).unwrap();
+        }
+        let newest = messages_page(&c, 1, None, 120).unwrap();
+        assert_eq!((newest.len(), newest[0].0, newest.last().unwrap().0), (120, 180, 299), "the newest page, oldest first");
+        let older = messages_page(&c, 1, Some(180), 120).unwrap();
+        assert_eq!((older[0].0, older.last().unwrap().0), (60, 179), "the page before it");
+        assert_eq!(last_phase(&c, 1).unwrap(), "teach", "found without reading the history");
+        let (opener, first) = firsts(&c, 1).unwrap();
+        assert_eq!((opener.as_str(), first.as_deref()), (Some("Teach me"), Some("## Part 0")));
+        let sections = sections_page(&c, 1, None, 40).unwrap();
+        assert_eq!((sections.len(), sections.last().unwrap().1.as_str()), (40, "## Part 99"));
+        assert_eq!(sections_page(&c, 1, Some(sections[0].0), 40).unwrap().last().unwrap().1, "## Part 59");
     }
 
     #[test]

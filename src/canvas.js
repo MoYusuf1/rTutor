@@ -10,11 +10,16 @@ import { toBottom } from "./chat.js";
 const body = () => $("#canvas-body");
 let stopLazy = () => {};
 
-/** A lesson's sections, newest in view; older ones render as the learner scrolls up to them. */
-export function showSections(sections, title) {
+/** A lesson's sections, newest in view; older ones render as the learner scrolls up to them. Only the newest page
+ *  arrives with the lesson: `page.before` is where to ask for the one before it (none: this is all of it), and
+ *  `page.first` the lesson's first section, which decides whether its heading is the title. */
+export function showSections(sections, title, page = {}) {
   stopLazy();
   body().replaceChildren();
-  body().classList.toggle("titled", !!sections.length && leadHeading(sections[0]) === title);
+  const first = page.first ?? sections[0];
+  body().classList.toggle("titled", !!first && leadHeading(first) === title);
+  let before = page.before;
+  const id = page.id;
   stopLazy = newestFirst({
     box: body(),
     scroller: $("#canvas"),
@@ -22,6 +27,12 @@ export function showSections(sections, title) {
     batch: 20,
     render: (m, frag) => frag.append(md(m)),
     placed: (nodes) => nodes.forEach(drawDiagrams),
+    older: before == null ? null : async () => {
+      if (before == null) return [];
+      const p = await invoke("lesson_sections", { id, before }).catch(() => ({ sections: [] }));
+      before = p.before;
+      return p.sections;
+    },
   });
 }
 

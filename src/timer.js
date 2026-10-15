@@ -49,6 +49,22 @@ function pomoToggle() {
 
 let ticking = 0;
 
+/** On to the next session. `live`: it ended just now, so chime, say so and maybe start the next one; otherwise
+ *  it ended while the app was closed, and the next one simply waits. */
+function advance(live) {
+  const set = pomoSet();
+  if (live) chime();
+  if (pomo.mode === "focus") {
+    const next = pomo.count % set.every === 0 ? "long" : "short";
+    pomo.count++;
+    if (live) app.note(next === "long" ? `${set.every} focus sessions done. Take ${set.long} minutes.` : `Focus session done. Take ${set.short}.`);
+    pomoTo(next, live && set.autoBreak);
+  } else {
+    if (live) app.note("Break's over. Time to focus.");
+    pomoTo("focus", live && set.autoFocus);
+  }
+}
+
 /** The button by Sources, and the panel when it's open. `full` redraws the panel too (not just its clock).
  *  It ticks only while a session runs: an idle or paused timer costs nothing. */
 export function renderPomo(full = false) {
@@ -57,21 +73,7 @@ export function renderPomo(full = false) {
   const left = pomoLeft();
   const running = pomo.ends > 0;
   const started = running || pomo.left != null;
-  if (running && left <= 0) {
-    // a session ends: a chime, a note, and on to the next one
-    chime();
-    const set = pomoSet();
-    if (pomo.mode === "focus") {
-      const next = pomo.count % set.every === 0 ? "long" : "short";
-      pomo.count++;
-      app.note(next === "long" ? `${set.every} focus sessions done. Take ${set.long} minutes.` : `Focus session done. Take ${set.short}.`);
-      pomoTo(next, set.autoBreak);
-    } else {
-      app.note("Break's over. Time to focus.");
-      pomoTo("focus", set.autoFocus);
-    }
-    return;
-  }
+  if (running && left <= 0) return advance(true); // a session ends: a chime, a note, and on to the next one
   const b = $("#pomo");
   $("#pomo-time").textContent = started ? clock(left) : "Focus";
   b.className = `pomo ${pomo.mode}${running ? " running" : started ? " paused" : ""}`;
@@ -180,5 +182,6 @@ addEventListener("click", (e) => { if (!clickedIn(e, "pomo-pop", "pomo")) $("#po
 /** Starts the clock once the app's settings are loaded. */
 export function startTimer(hooks) {
   app = hooks;
-  renderPomo();
+  if (pomo.ends && pomo.ends <= Date.now()) advance(false);
+  else renderPomo();
 }

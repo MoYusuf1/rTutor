@@ -60,6 +60,7 @@ pub fn term_open(app: AppHandle, tab: u32, cwd: String, run: Option<String>, col
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(shell);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("MCP_TOOL_TIMEOUT", "1800000"); // Claude Code waits up to 30 minutes for the learner's answer to a tool call
     if !cwd.is_empty() {
         let _ = std::fs::create_dir_all(&cwd); // e.g. ~/rtutor on first use
     }
@@ -244,10 +245,14 @@ pub async fn pick_folder(app: AppHandle) -> Option<String> {
 
 /// What an agent needs to start rTutor's tool server (this executable), and where terminals open by default.
 #[tauri::command]
+/// Claude Code's MCP config goes in a file: JSON on a command line can't be quoted the same way in every shell.
 pub fn mcp_command() -> Result<serde_json::Value, String> {
     let bin = std::env::current_exe().map_err(err)?.display().to_string();
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    Ok(serde_json::json!({ "bin": bin, "home": home }))
+    let config = std::env::temp_dir().join("rtutor-mcp.json");
+    let json = serde_json::json!({ "mcpServers": { "rtutor": { "command": bin, "args": ["--mcp"] } } });
+    std::fs::write(&config, json.to_string()).map_err(err)?;
+    Ok(serde_json::json!({ "bin": bin, "home": home, "config": config.display().to_string() }))
 }
 
 #[cfg(test)]

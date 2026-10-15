@@ -1,7 +1,7 @@
 // API providers (Anthropic, OpenAI-compatible): the provider settings, and the tutor loop that streams each turn
 // and runs its tool calls here.
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { $, el } from "./dom.js";
+import { $, el, toast } from "./dom.js";
 import { app, fmt, saveSettings } from "./state.js";
 import { liveMarkdown, log, note, say, thinking, workBody } from "./chat.js";
 import { partialField } from "./markdown.js";
@@ -72,7 +72,7 @@ $("#settings").addEventListener("close", async () => {
     if ($("#p-key").value.trim()) await invoke("set_api_key", { provider: chosen, key: $("#p-key").value.trim() });
     await invoke("save_settings", { settings: s });
   } catch (e) {
-    alert(e);
+    toast(e);
   }
   showWho();
   handOverToApi(); // a message that was waiting for an agent goes to the provider just chosen

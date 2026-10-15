@@ -232,16 +232,27 @@ async function historyFlow(browser, engine) {
           case "tree": return { folders: [{ id: 1, parent: null, name: "Somali", dir: "" }], lessons: [{ id: 1, folder: 1, title: "Greetings" }, { id: 2, folder: 1, title: "Long" }], sources: [] };
           case "get_lesson": {
             // like the app: only the newest page of a long chat comes with the lesson
+            // (and of its sections), with a cursor to the page before each
             const l = structuredClone(lessons[args.id]);
             const from = Math.max(0, l.messages.length - 120);
-            return { ...l, messages: l.messages.slice(from), older: from };
+            const at = Math.max(0, l.sections.length - 40);
+            return { ...l, messages: l.messages.slice(from), messagesBefore: from || null,
+              sections: l.sections.slice(at), sectionsBefore: at || null, sectionCount: l.sections.length, firstSection: l.sections[0] ?? null };
           }
-          case "lesson_history": return lessons[args.id].messages.slice(Math.max(0, args.before - 120), args.before);
+          case "lesson_history": {
+            const from = Math.max(0, args.before - 120);
+            return { messages: lessons[args.id].messages.slice(from, args.before), before: from || null, toolResults: {} };
+          }
+          case "lesson_sections": {
+            const from = Math.max(0, args.before - 40);
+            return { sections: lessons[args.id].sections.slice(from, args.before), before: from || null };
+          }
           case "mcp_command": return { bin: "/opt/rtutor", home: "/home/me" };
           case "installed_agents": return ["claude"];
           case "log_listen": return ["/tmp/rtutor.log", []];
           case "rename_folder": window.__renamed = args.name; return;
-          case "create_lesson": return 3;
+          case "create_lesson": await new Promise((r) => setTimeout(r, 50)); return 3;
+          case "search": return [];
           default: return;
         }
       },
@@ -279,8 +290,13 @@ async function historyFlow(browser, engine) {
   await page.evaluate(() => { const d = document.createElement("div"); d.className = "msg bot"; d.style.height = "300px"; d.textContent = "new"; document.querySelector("#log").append(d); });
   await page.waitForTimeout(100);
   { const g = await gap(); assert.ok(g < 4, `something new keeps the chat at its end (${g}px short)`); }
-  await page.locator("#canvas").evaluate((c) => (c.scrollTop = 0));
-  await page.waitForFunction(() => document.querySelectorAll("#canvas-body > .md").length > 20);
+  // scrolling the lesson up fetches older pages of sections until its first one
+  for (let tries = 0; tries < 60 && !(await page.locator("#canvas-body").getByText("Part 1", { exact: true }).count()); tries++) {
+    await page.locator("#canvas").evaluate((c) => (c.scrollTop = 0));
+    await page.waitForTimeout(100);
+  }
+  await page.locator("#canvas-body").getByText("Part 1", { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => window.__calls.filter((c) => c === "lesson_sections").length >= 2), "older sections came a page at a time");
   // scrolling the chat up fetches older pages of history until the very first message
   for (let tries = 0; tries < 40 && !(await page.locator("#log .msg").getByText("message 1", { exact: true }).count()); tries++) {
     await page.locator("#log").evaluate((l) => (l.scrollTop = 0));
@@ -291,8 +307,14 @@ async function historyFlow(browser, engine) {
   // no tutor running: the chat says so and offers to start one, instead of a pretend "Thinking…"
   await page.locator("#tree .row.folder .label").click();
   await page.locator("#start-input").fill("Numbers");
-  await page.locator("#start-btn").click();
+  await page.locator("#start-input").press("Enter");
+  await page.locator("#start-input").press("Enter"); // a second Enter while the first is still making the lesson
   await page.locator(".card.setup").getByText("Start Claude Code").waitFor();
+  assert.equal(await page.evaluate(() => window.__calls.filter((c) => c === "create_lesson").length), 1, "one lesson, however many Enters");
+  // a search that finds nothing says so
+  await page.locator("#search-btn").click();
+  await page.locator("#search-input").fill("zzz");
+  await page.locator("#results").getByText("No matches").waitFor();
   assert.equal(await page.locator(".work").count(), 0, "nothing pretends to think");
   assert.deepEqual(errors, []);
   await page.close();

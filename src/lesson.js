@@ -80,13 +80,13 @@ export async function openLesson(id) {
   const l = await invoke("get_lesson", { id });
   if (mine !== app.gen) return; // the learner clicked something else meanwhile
   $("#lesson").classList.remove("loading");
-  app.lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sections.length, toolResults: l.toolResults ?? {}, phase: null, last: null };
+  app.lesson = { id, title: l.title, folder: l.folder, state: l.state, sections: l.sectionCount ?? l.sections.length, toolResults: l.toolResults ?? {}, phase: null, last: null };
   app.target = l.folder;
   showLesson();
-  showSections(l.sections, l.title);
+  showSections(l.sections, l.title, { id, before: l.sectionsBefore, first: l.firstSection });
   // the phase: the last one reported (Rust reads the whole history for it), else the gear the lesson started in,
   // else teaching if it is under way
-  app.lesson.phase = l.phase ?? ((typeof l.opener === "string" && gearOf(l.opener)?.phase) || (l.sections.length ? "teach" : null));
+  app.lesson.phase = l.phase ?? ((typeof l.opener === "string" && gearOf(l.opener)?.phase) || (app.lesson.sections ? "teach" : null));
   const results = app.lesson.toolResults;
   // calls that have an answer; results always come after their call, so newer pages fill this before older ones replay
   const answered = new Set();
@@ -94,15 +94,17 @@ export async function openLesson(id) {
     for (const m of page) if (m.role === "user" && Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result") answered.add(b.tool_use_id);
     return page;
   };
-  // only the newest page of the chat arrives with the lesson; older pages load as the learner scrolls up to them
-  let before = l.older;
+  // only the newest page of the chat arrives with the lesson; older pages (and their answers) load as the learner
+  // scrolls up to them
+  let before = l.messagesBefore;
   const older = async () => {
-    if (!before || mine !== app.gen) return [];
-    const page = await invoke("lesson_history", { id, before }).catch(() => []);
-    before -= page.length;
-    return learn(page);
+    if (before == null || mine !== app.gen) return [];
+    const page = await invoke("lesson_history", { id, before }).catch(() => ({ messages: [] }));
+    before = page.before;
+    Object.assign(results, page.toolResults);
+    return learn(page.messages);
   };
-  stopChat = newestFirst({ box: log(), scroller: log(), items: learn(l.messages), batch: 40, older, render: (m, frag) => renderInto(frag, () => replay(m, results, answered)) });
+  stopChat = newestFirst({ box: log(), scroller: log(), items: learn(l.messages), batch: 40, older: before == null ? null : older, render: (m, frag) => renderInto(frag, () => replay(m, results, answered)) });
   // open on the newest part, not the top (diagrams and fonts settle a moment later, so look again)
   showLatest();
   setTimeout(() => mine === app.gen && showLatest(), 400);
@@ -121,6 +123,7 @@ export async function openSource(s) {
   const { name, body } = await invoke("get_source", { id: s.id });
   leave();
   app.lesson = null;
+  app.doc = s; // files dropped while reading it go to its subject
   show("doc");
   renderSidebar();
   $("#doc-title").textContent = name;

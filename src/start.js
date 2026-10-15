@@ -1,7 +1,7 @@
 // The start screen: what to learn, how to start (the gear), and material to teach from.
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { $, el, store } from "./dom.js";
+import { $, el, store, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import { app, folderPath, materialsFor } from "./state.js";
 import { GEARS } from "./phases.js";
@@ -38,7 +38,11 @@ export function renderStart() {
   $("#crumb").textContent = subject ? (path.length > 1 ? `${path.slice(0, -1).join(" / ")} · New lesson` : "New lesson") : "";
   $("#start-title").textContent = subject ? path.at(-1) : opener;
   $("#start-input").setAttribute("aria-label", subject ? "What should this lesson cover?" : "What do you want to learn?");
-  $("#materials").replaceChildren(...pending.map((p, i) => chip(p.name, p.words, () => { pending.splice(i, 1); renderStart(); })));
+  $("#materials").replaceChildren(...pending.map((p, i) => chip(p.name, p.words, () => {
+    pending.splice(i, 1);
+    invoke("forget_source", { token: p.token }).catch(() => {});
+    renderStart();
+  })));
   $("#gears").replaceChildren(
     ...Object.entries(GEARS).map(([id, g]) => {
       const b = el("button", "gear");
@@ -81,6 +85,7 @@ export function startNew(folder) {
   if (folder == null) opener = OPENERS[Math.floor(Math.random() * OPENERS.length)];
   app.lesson = null;
   app.target = folder;
+  for (const p of pending) invoke("forget_source", { token: p.token }).catch(() => {});
   pending = [];
   $("#start-input").value = "";
   show("start");
@@ -89,22 +94,49 @@ export function startNew(folder) {
   $("#start-input").focus();
 }
 
-/** Adds picked or dropped material to `folder`, or holds it for the subject about to be made. */
+/** Adds picked or dropped material (read by Rust, which hands back a token for each) to `folder`, or holds it
+ *  for the subject about to be made. */
 async function addMaterial(files, folder) {
-  for (const f of files) {
-    if (folder == null) pending.push(f);
-    else await invoke("add_source", { folder, lesson: null, name: f.name, text: f.text }).catch((e) => alert(e));
+  if (folder == null) pending.push(...files);
+  else {
+    let done = 0;
+    for (const f of files) {
+      toast(`Adding ${f.name}${files.length > 1 ? ` (${++done} of ${files.length})` : ""}…`, 0);
+      try {
+        await invoke("add_source", { folder, lesson: null, token: f.token });
+      } catch (e) {
+        toast(`Couldn't add ${f.name}: ${e}`);
+        done = -1;
+      }
+    }
+    if (done >= 0) toast(files.length ? `Added ${files.length > 1 ? `${files.length} files` : files[0].name}` : "", 2500);
+    await refresh();
   }
-  if (folder != null) await refresh();
   if (!$("#start").hidden) renderStart();
   if (app.lesson) renderSources();
+}
+
+/** Reads each path in Rust; one that can't be read is reported and skipped, not the whole drop. */
+async function readAll(paths) {
+  const files = [];
+  for (const [i, path] of paths.entries()) {
+    if (paths.length > 1) toast(`Reading ${i + 1} of ${paths.length}…`, 0);
+    try {
+      files.push(await invoke("read_source", { path }));
+    } catch (e) {
+      toast(`Couldn't read ${path.split(/[\\/]/).pop()}: ${e}`);
+      return files;
+    }
+  }
+  toast("");
+  return files;
 }
 
 export async function attach({ folder } = {}) {
   try {
     await addMaterial(await invoke("pick_source"), folder ?? null);
   } catch (e) {
-    alert(e);
+    toast(e);
   }
 }
 
@@ -118,19 +150,26 @@ try {
     $("#dropping").hidden = payload.type !== "over" && payload.type !== "enter";
     if (payload.type !== "drop") return;
     $("#dropping").hidden = true;
-    const folder = app.lesson ? app.lesson.folder : !$("#start").hidden ? app.target : null;
-    try {
-      const files = [];
-      for (const path of payload.paths) files.push(await invoke("read_source", { path }));
-      await addMaterial(files, folder);
-    } catch (e) {
-      alert(e);
-    }
+    const folder = app.lesson ? app.lesson.folder : !$("#start").hidden ? app.target : !$("#doc").hidden ? app.doc?.folder ?? null : null;
+    await addMaterial(await readAll(payload.paths), folder);
   });
 } catch { /* outside the app window (tests) */ }
 
+let starting = false; // a second Enter while the first is still making the lesson would make two
 $("#start-form").onsubmit = async (e) => {
   e.preventDefault();
+  if (starting) return;
+  starting = true;
+  try {
+    await start();
+  } catch (e) {
+    toast(e);
+  } finally {
+    starting = false;
+  }
+};
+
+async function start() {
   const text = $("#start-input").value.trim();
   if (!text && !materialsFor(app.target).length && !pending.length) return $("#start-input").focus();
   if (!(await tutorReady())) return; // an API provider that isn't set up yet: its settings opened instead
@@ -141,8 +180,9 @@ $("#start-form").onsubmit = async (e) => {
   let folder = app.target;
   if (folder == null) {
     folder = await invoke("create_folder", { parent: null, name: title });
-    for (const p of pending) await invoke("add_source", { folder, lesson: null, name: p.name, text: p.text });
+    const held = pending;
     pending = [];
+    for (const p of held) await invoke("add_source", { folder, lesson: null, token: p.token }).catch((e) => toast(`Couldn't add ${p.name}: ${e}`));
   }
   unfold(folder);
   const id = await invoke("create_lesson", { folder, title });
@@ -153,4 +193,4 @@ $("#start-form").onsubmit = async (e) => {
   showLesson();
   renderSidebar();
   send(`${words}\n\n${g.tell}`, words); // the tutor gets the gear; the chat shows what the learner wrote
-};
+}

@@ -68,7 +68,9 @@ struct Agent {
     #[serde(skip)]
     lesson: i64, // the lesson its latest message came from; its tool calls apply there
     #[serde(skip)]
-    briefed: HashSet<i64>,
+    briefed: HashSet<i64>, // lessons whose brief it has had (cleared when the subject's material changes)
+    #[serde(skip)]
+    taught: bool, // it has had the teaching instructions
 }
 
 /// If rTutor is already running, asks it to come forward and returns true (this launch should then exit).
@@ -98,6 +100,14 @@ fn random() -> String {
 }
 
 impl Bridge {
+    /// A subject's material changed: its agents get the lesson brief (with the new contents) again next message.
+    pub fn material_changed(&self, dir: &str) {
+        let mut s = self.lock();
+        for a in s.agents.iter_mut().filter(|a| within(&a.cwd, dir)) {
+            a.briefed.clear();
+        }
+    }
+
     /// Listens on a free localhost port and writes it, with a fresh token, where `rtutor --mcp` looks.
     pub fn start<R: Runtime>(app: &AppHandle<R>, data_dir: &std::path::Path) -> std::io::Result<Bridge> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -156,7 +166,7 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
             s.seq += 1;
             let id = s.seq;
             let text = |k: &str| hello[k].as_str().unwrap_or_default().to_owned();
-            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new() });
+            s.agents.push(Agent { id, name: text("name"), cwd: text("cwd"), cmd: text("cmd"), busy: false, waiting: false, stopped: false, unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false });
             if s.active.is_none() {
                 s.active = Some(id);
             }
@@ -197,7 +207,7 @@ fn serve<R: Runtime>(app: &AppHandle<R>, stream: TcpStream) -> std::io::Result<(
             let dir = s.agents.iter().find(|a| a.id == agent).map(|a| a.cwd.clone()).unwrap_or_default();
             s.inbox.push_front(Item { lesson, text: learner, dir, own: false });
             if let Some(a) = s.agents.iter_mut().find(|a| a.id == agent) {
-                (a.busy, a.briefed, a.unanswered) = (false, HashSet::new(), None); // it never saw the brief either
+                (a.busy, a.briefed, a.taught, a.unanswered) = (false, HashSet::new(), false, None); // it never saw the brief either
             }
             bridge.changed(&s);
         }
@@ -304,7 +314,7 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
         let i = s.next_for(agent).unwrap_or_default();
         let Item { lesson, text, .. } = s.inbox.remove(i).ok_or("rTutor restarted. Call next again.")?;
         let a = s.agents.iter_mut().find(|a| a.id == agent).ok_or("rTutor restarted. Call next again.")?;
-        let first = a.briefed.is_empty();
+        let first = !std::mem::replace(&mut a.taught, true);
         let new_lesson = a.briefed.insert(lesson);
         let switched = a.lesson != 0 && a.lesson != lesson;
         (a.lesson, a.busy, a.waiting, a.unanswered) = (lesson, true, false, Some((lesson, text.clone())));
@@ -327,6 +337,11 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     if lesson == 0 {
         return Err("No lesson yet. Call next to get the learner's first message.".into());
     }
+    // the learner may have deleted the lesson while the agent was still on it
+    let exists = app.state::<crate::Store>().db()?.query_row("SELECT 1 FROM lessons WHERE id = ?1", [lesson], |_| Ok(())).is_ok();
+    if !exists {
+        return Err("The learner deleted this lesson. Stop working on it and call next to wait for them.".into());
+    }
     let Some(page) = s.page.clone() else { return Err("The rTutor window isn't ready. Try again.".into()) };
     s.seq += 1;
     let id = s.seq;
@@ -348,8 +363,10 @@ fn call<R: Runtime>(app: &AppHandle<R>, bridge: &Bridge, agent: u64, tool: &str,
     let mut result = result;
     result["type"] = json!("tool_result");
     result["tool_use_id"] = json!(use_id);
-    crate::record(app, lesson, json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": use_id, "name": tool, "input": input }] }))?;
-    crate::record(app, lesson, json!({ "role": "user", "content": [result.clone()] }))?;
+    crate::record_all(app, lesson, vec![
+        json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": use_id, "name": tool, "input": input }] }),
+        json!({ "role": "user", "content": [result.clone()] }),
+    ])?;
     let text = result["content"].as_str().unwrap_or_default().to_owned();
     if result["is_error"] == true { Err(text) } else { Ok((text, None)) }
 }
@@ -463,7 +480,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let c = crate::db::open(&dir.join("test.db")).unwrap();
         c.execute_batch("INSERT INTO folders (id, name) VALUES (1, 'Somali'); INSERT INTO lessons (id, folder_id, title, updated) VALUES (1, 1, 'Greetings', 0);").unwrap();
-        app.manage(crate::Store { db: Mutex::new(c), open: Mutex::default(), http: crate::http_client(), stops: Mutex::default() });
+        app.manage(crate::Store { db: Mutex::new(c), open: Mutex::default(), http: crate::http_client(), stops: Mutex::default(), extracted: Mutex::default() });
         app.manage(Bridge::start(app.handle(), &dir).unwrap());
         (app, dir)
     }
@@ -480,7 +497,7 @@ mod tests {
     fn each_subject_goes_to_the_agent_running_in_its_folder() {
         let agent = |id: u64, cwd: &str| super::Agent {
             id, name: "codex".into(), cwd: cwd.into(), cmd: String::new(), busy: false, waiting: true, stopped: false,
-            unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(),
+            unanswered: None, owes: false, reminded: false, lesson: 0, briefed: HashSet::new(), taught: false,
         };
         let item = |dir: &str, own: bool| Item { lesson: 1, text: "hi".into(), dir: dir.into(), own };
         let mut s = S { agents: vec![agent(1, "/home/me/rtutor"), agent(2, "/home/me/rtutor/Somali")], active: Some(1), ..S::default() };

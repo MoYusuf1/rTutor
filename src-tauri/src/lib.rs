@@ -20,6 +20,9 @@ struct Store {
     open: Mutex<Open>,
     http: reqwest::Client, // one pooled client: connections are reused across turns
     stops: Mutex<std::collections::HashMap<i64, futures_util::future::AbortHandle>>, // running API turns, by lesson
+    // material read from files, waiting to be added: the page holds only a token, never the text (a book is
+    // megabytes, and would otherwise cross to the page and back)
+    extracted: Mutex<std::collections::HashMap<u64, (String, String)>>,
 }
 
 /// The lesson currently being taught, kept in memory so each turn only appends.
@@ -267,14 +270,27 @@ fn lesson_title<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64) -> Re
 
 /// Appends a terminal agent's turn to the lesson history, which the page and API providers read back.
 fn record<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msg: Value) -> Res<()> {
+    record_all(app, lesson, vec![msg])
+}
+
+/// Appends messages in one transaction (a tool call and its result are one write, not two).
+fn record_all<R: tauri::Runtime>(app: &tauri::AppHandle<R>, lesson: i64, msgs: Vec<Value>) -> Res<()> {
     let store = app.state::<Store>();
     let c = store.db()?;
     let mut o = store.open.lock().map_err(err)?;
+    let tx = c.unchecked_transaction().map_err(err)?;
+    let mut seq = if o.lesson == lesson { o.messages.len() } else { db::next_seq(&tx, lesson)? };
+    let mut stored = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        let len = db::append_message(&tx, lesson, seq, &msg)?;
+        stored.push((msg, len));
+        seq += 1;
+    }
+    tx.commit().map_err(err)?;
     if o.lesson == lesson {
-        let len = db::append_message(&c, lesson, o.messages.len(), &msg)?;
-        o.push(msg, len);
-    } else {
-        db::append_message(&c, lesson, db::next_seq(&c, lesson)?, &msg)?;
+        for (msg, len) in stored {
+            o.push(msg, len);
+        }
     }
     Ok(())
 }
@@ -418,44 +434,52 @@ fn mirror_lesson(c: &Connection, lesson: i64) -> Res<()> {
 
 #[tauri::command]
 fn get_lesson(store: State<Store>, id: i64) -> Res<Value> {
+    // Opening a lesson reads a page of it, never all of it: the newest messages and sections, what they need, and
+    // the few facts the page would otherwise scan the history for. Older pages come as the learner scrolls up.
     let c = store.db()?;
-    let mut lesson = db::lesson(&c, id)?;
-    let open = Open::load(id, db::messages(&c, id)?);
-    let all = &open.messages;
-    // only the newest page goes to the page; older ones come from lesson_history as the learner scrolls up
-    let from = all.len().saturating_sub(HISTORY_PAGE);
-    lesson["messages"] = json!(all[from..]);
-    lesson["older"] = json!(from);
-    // what the page would otherwise read the whole history for: the latest phase and how the lesson began
-    lesson["phase"] = all
-        .iter()
-        .rev()
-        .flat_map(|m| m["content"].as_array().into_iter().flatten().rev())
-        .find(|b| b["type"] == "tool_use" && b["name"] == "phase")
-        .map_or(Value::Null, |b| b["input"]["phase"].clone());
-    lesson["opener"] = all.first().map_or(Value::Null, |m| m["content"].clone());
-    lesson["toolResults"] = db::tool_results(&c, id)?;
-    *store.open.lock().map_err(err)? = open;
-    Ok(lesson)
+    let (title, folder, state): (String, Option<i64>, String) = c
+        .query_row("SELECT title, folder_id, state FROM lessons WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(err)?;
+    let count: i64 = c.query_row("SELECT COUNT(*) FROM sections WHERE lesson_id = ?1", [id], |r| r.get(0)).map_err(err)?;
+    let sections = db::sections_page(&c, id, None, SECTIONS_PAGE)?;
+    let messages = db::messages_page(&c, id, None, HISTORY_PAGE)?;
+    let (opener, first) = db::firsts(&c, id)?;
+    Ok(json!({
+        "id": id, "title": title, "folder": folder, "state": state, "sectionCount": count, "firstSection": first,
+        "sections": sections.iter().map(|(_, s)| s).collect::<Vec<_>>(),
+        "sectionsBefore": if (sections.len() as i64) < count { sections.first().map(|(i, _)| *i) } else { None },
+        "messages": messages.iter().map(|(_, m)| m).collect::<Vec<_>>(),
+        "messagesBefore": messages.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0),
+        "toolResults": db::tool_results_for(&c, id, &db::tool_ids(&messages))?,
+        "phase": db::last_phase(&c, id)?,
+        "opener": opener,
+    }))
 }
 
-/// Messages per page of a lesson's chat history.
+/// Messages and canvas sections per page of a lesson.
 const HISTORY_PAGE: usize = 120;
+const SECTIONS_PAGE: usize = 40;
 
-/// The page of history just before `before` (an index into the lesson's messages), oldest first.
+/// The page of chat history before message `before` (a seq), oldest first, with its saved answers.
 #[tauri::command]
-fn lesson_history(store: State<Store>, id: i64, before: usize) -> Res<Value> {
-    let o = store.open.lock().map_err(err)?;
-    let page = |all: &[Value]| {
-        let end = before.min(all.len());
-        json!(all[end.saturating_sub(HISTORY_PAGE)..end])
-    };
-    if o.lesson == id {
-        return Ok(page(&o.messages));
-    }
-    drop(o);
-    let all: Vec<Value> = db::messages(&*store.db()?, id)?.into_iter().map(|(m, _)| m).collect();
-    Ok(page(&all))
+fn lesson_history(store: State<Store>, id: i64, before: i64) -> Res<Value> {
+    let c = store.db()?;
+    let page = db::messages_page(&c, id, Some(before), HISTORY_PAGE)?;
+    Ok(json!({
+        "messages": page.iter().map(|(_, m)| m).collect::<Vec<_>>(),
+        "before": page.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0),
+        "toolResults": db::tool_results_for(&c, id, &db::tool_ids(&page))?,
+    }))
+}
+
+/// The page of canvas sections before section `before`, oldest first.
+#[tauri::command]
+fn lesson_sections(store: State<Store>, id: i64, before: i64) -> Res<Value> {
+    let page = db::sections_page(&*store.db()?, id, Some(before), SECTIONS_PAGE)?;
+    Ok(json!({
+        "sections": page.iter().map(|(_, s)| s).collect::<Vec<_>>(),
+        "before": page.first().map(|(i, _)| *i),
+    }))
 }
 
 #[tauri::command]
@@ -592,7 +616,22 @@ fn delete_folder(store: State<Store>, id: i64) -> Res<()> {
 fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) -> Res<()> {
     let c = store.db()?;
     match kind.as_str() {
-        "lesson" => exec(&c, "UPDATE lessons SET folder_id = ?2 WHERE id = ?1", params![id, folder])?,
+        "lesson" => {
+            exec(&c, "UPDATE lessons SET folder_id = ?2 WHERE id = ?1", params![id, folder])?;
+            // its folder moves into the new subject's (a lesson outside any subject keeps no folder)
+            let dir: String = c.query_row("SELECT dir FROM lessons WHERE id = ?1", [id], |r| r.get(0)).map_err(err)?;
+            if let (false, Some((_, subject, _))) = (dir.is_empty(), db::subject_of_lesson(&c, id)?) {
+                let old = std::path::Path::new(&dir);
+                let parent = material::subject_dir(&subject);
+                if old.parent() != Some(parent.as_path()) {
+                    let new = material::fresh_dir(&parent, &old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    if std::fs::create_dir_all(&parent).and_then(|_| std::fs::rename(old, &new)).is_ok() {
+                        exec(&c, "UPDATE lessons SET dir = ?2 WHERE id = ?1", params![id, new.display().to_string()])?;
+                    }
+                }
+            }
+            1
+        }
         "folder" => {
             if let Some(f) = folder {
                 if db::is_within(&c, f, id)? {
@@ -609,64 +648,93 @@ fn move_item(store: State<Store>, kind: String, id: i64, folder: Option<i64>) ->
 
 // ---------- sources: material the tutor teaches from ----------
 
-fn read_material(path: std::path::PathBuf) -> Res<Value> {
+/// Reads a file's text and keeps it until `add_source` (or `forget_source`). The page gets a token, a name and a
+/// word count: the text itself never leaves Rust.
+fn read_material(app: &tauri::AppHandle, path: std::path::PathBuf) -> Res<Value> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let text = material::extract(&path)?;
     if text.is_empty() {
         return Err(format!("No text found in {name}. Scanned PDFs need OCR first."));
     }
     let words = text.split_whitespace().count();
-    Ok(json!({ "name": name, "text": text, "words": words }))
+    let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    app.state::<Store>().extracted.lock().map_err(err)?.insert(token, (name.clone(), text));
+    Ok(json!({ "token": token, "name": name, "words": words }))
 }
 
-/// Opens the file picker and returns each file's extracted text (stored by `add_source`).
+/// Opens the file picker and reads each file (kept by `add_source`).
 #[tauri::command]
 async fn pick_source(app: tauri::AppHandle) -> Res<Vec<Value>> {
     let Some(files) = app.dialog().file().add_filter("Material", &["pdf", "txt", "md", "srt", "vtt"]).blocking_pick_files() else {
         return Ok(vec![]);
     };
     let paths: Vec<_> = files.into_iter().filter_map(|f| f.into_path().ok()).collect();
-    tauri::async_runtime::spawn_blocking(move || paths.into_iter().map(read_material).collect()).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || paths.into_iter().map(|p| read_material(&app, p)).collect()).await.map_err(err)?
 }
 
 /// A file dropped onto the window.
 #[tauri::command]
-async fn read_source(path: String) -> Res<Value> {
-    tauri::async_runtime::spawn_blocking(move || read_material(path.into())).await.map_err(err)?
+async fn read_source(app: tauri::AppHandle, path: String) -> Res<Value> {
+    tauri::async_runtime::spawn_blocking(move || read_material(&app, path.into())).await.map_err(err)?
+}
+
+/// Material read but not added after all (its chip was removed): its text is let go.
+#[tauri::command]
+fn forget_source(store: State<Store>, token: u64) {
+    if let Ok(mut m) = store.extracted.lock() {
+        m.remove(&token);
+    }
 }
 
 /// Stores material: split into searchable parts, and written as a Markdown file in its subject's folder.
 #[tauri::command]
-fn add_source(store: State<Store>, folder: Option<i64>, lesson: Option<i64>, name: String, text: String) -> Res<i64> {
-    let c = store.db()?;
-    let home = match (folder, lesson) {
-        (Some(f), _) => Some(f),
-        (None, Some(l)) => c.query_row("SELECT folder_id FROM lessons WHERE id = ?1", [l], |r| r.get(0)).map_err(err)?,
-        _ => None,
-    };
-    // ponytail: a material file that can't be written (read-only home, odd name) just means no file; the parts still work
-    let file = match home {
-        Some(f) => material::write_file(&db::subject_of(&c, f)?, &name, &text).map(|p| p.display().to_string()).unwrap_or_default(),
-        None => String::new(),
-    };
-    let twin: Option<String> = c
-        .prepare_cached("SELECT name FROM sources WHERE folder_id IS ?1 AND lesson_id IS ?2")
-        .and_then(|mut q| q.query_map(params![folder, lesson], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
-        .map_err(err)?
-        .into_iter()
-        .find(|n| material::stem(n) == material::stem(&name));
-    if let Some(twin) = twin {
-        return Err(format!("{name} looks like {twin}, which is already here, so it wasn't added again."));
-    }
-    let words = text.split_whitespace().count() as i64;
-    let tx = c.unchecked_transaction().map_err(err)?;
-    // the text is kept once, as searchable parts (plus the Markdown file); `body` stays empty
-    exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, '', ?4, ?5)", params![folder, lesson, name, words, file])?;
-    let id = tx.last_insert_rowid();
-    db::add_parts(&tx, id, &text).map_err(err)?;
-    tx.commit().map_err(err)?;
-    store.forget(None);
-    Ok(id)
+async fn add_source(app: tauri::AppHandle, folder: Option<i64>, lesson: Option<i64>, token: u64) -> Res<i64> {
+    // splitting a book and writing its file are the slow parts: both run with the database free for everyone else
+    // (the tutor's tool calls, the chat), and off the main thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let (name, text) = store.extracted.lock().map_err(err)?.remove(&token).ok_or("That file was already added, or read too long ago. Add it again.")?;
+        let subject = {
+            let c = store.db()?;
+            let twin: Option<String> = c
+                .prepare_cached("SELECT name FROM sources WHERE folder_id IS ?1 AND lesson_id IS ?2")
+                .and_then(|mut q| q.query_map(params![folder, lesson], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>())
+                .map_err(err)?
+                .into_iter()
+                .find(|n| material::stem(n) == material::stem(&name));
+            if let Some(twin) = twin {
+                return Err(format!("{name} looks like {twin}, which is already here, so it wasn't added again."));
+            }
+            let home: Option<i64> = match (folder, lesson) {
+                (Some(f), _) => Some(f),
+                (None, Some(l)) => c.query_row("SELECT folder_id FROM lessons WHERE id = ?1", [l], |r| r.get(0)).map_err(err)?,
+                _ => None,
+            };
+            home.map(|f| db::subject_of(&c, f)).transpose()?
+        };
+        let parts = material::chunk(&text);
+        // ponytail: a material file that can't be written (read-only home, odd name) just means no file; the parts still work
+        let file = subject.as_deref().map(|s| material::write_file(s, &name, &text).map(|p| p.display().to_string()).unwrap_or_default()).unwrap_or_default();
+        let words = text.split_whitespace().count() as i64;
+        drop(text);
+        let c = store.db()?;
+        let tx = c.unchecked_transaction().map_err(err)?;
+        // the text is kept once, as searchable parts (plus the Markdown file); `body` stays empty
+        exec(&tx, "INSERT INTO sources (folder_id, lesson_id, name, body, words, file) VALUES (?1, ?2, ?3, '', ?4, ?5)", params![folder, lesson, name, words, file])?;
+        let id = tx.last_insert_rowid();
+        db::insert_parts(&tx, id, &parts).map_err(err)?;
+        tx.commit().map_err(err)?;
+        drop(c);
+        store.forget(None);
+        // agents already teaching this subject were briefed without it: the next message briefs them again
+        if let Some(s) = subject {
+            app.state::<bridge::Bridge>().material_changed(&material::subject_dir(&s).display().to_string());
+        }
+        Ok(id)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -787,21 +855,25 @@ pub fn run() {
             log::init(&dir);
             log::note(format!("rTutor {} started", env!("CARGO_PKG_VERSION")));
             let c = db::open(&dir.join("rtutor.db"))?;
-            renamed_paths(&c);
-            relocate_sources(&c);
+            // one-time moves of files from older layouts: run once, not on every launch
+            if c.query_row("SELECT 1 FROM settings WHERE key = 'done:layout-v1'", [], |_| Ok(())).is_err() {
+                renamed_paths(&c);
+                relocate_sources(&c);
+                let _ = c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('done:layout-v1', '1')", []);
+            }
             // lessons made before they had folders get one, with their page and notes written out
             let pending: Vec<i64> = c.prepare("SELECT id FROM lessons WHERE dir = ''").and_then(|mut q| q.query_map([], |r| r.get(0))?.collect()).unwrap_or_default();
             for id in pending {
                 let _ = mirror_lesson(&c, id);
             }
-            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: http_client(), stops: Mutex::default() });
+            app.manage(Store { db: Mutex::new(c), open: Mutex::default(), http: http_client(), stops: Mutex::default(), extracted: Mutex::default() });
             app.manage(bridge::Bridge::start(app.handle(), &dir)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            send, lesson_history, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
+            send, lesson_history, lesson_sections, test_provider, save_tool_result, set_api_key, has_api_key, tree, get_lesson, create_lesson, add_section, rename_lesson, bookmark_lesson,
             delete_lesson, search, export_lesson, create_folder, rename_folder, delete_folder, move_item, pick_source, add_source,
-            get_source, delete_source, read_source, material_search, material_read, get_settings, save_settings, stats, set_state,
+            get_source, delete_source, read_source, forget_source, material_search, material_read, get_settings, save_settings, stats, set_state,
             pty::term_open, pty::term_write, pty::term_resize, pty::term_close, pty::pick_folder, pty::mcp_command, pty::installed_agents, pty::agent_models,
             stop_turn, set_subject_notes, log::log_listen, log::log_note, bridge::agent_stop, bridge::agent_listen, bridge::agent_send, bridge::agent_result, bridge::agent_use
         ])
