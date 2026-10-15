@@ -249,7 +249,10 @@ pub async fn pick_folder(app: AppHandle) -> Option<String> {
 #[tauri::command]
 /// Claude Code's MCP config goes in a file: JSON on a command line can't be quoted the same way in every shell.
 pub fn mcp_command() -> Result<serde_json::Value, String> {
-    let bin = std::env::current_exe().map_err(err)?.display().to_string();
+    // the small tool server shipped next to the app; the app itself (`rtutor --mcp`) when it isn't there (dev builds)
+    let app = std::env::current_exe().map_err(err)?;
+    let small = app.with_file_name(format!("rtutor-mcp{}", std::env::consts::EXE_SUFFIX));
+    let bin = if std::fs::metadata(&small).is_ok_and(|m| m.len() > 0) { small } else { app }.display().to_string();
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let config = std::env::temp_dir().join("rtutor-mcp.json");
     let json = serde_json::json!({ "mcpServers": { "rtutor": { "command": bin, "args": ["--mcp"] } } });

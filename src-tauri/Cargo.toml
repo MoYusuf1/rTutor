@@ -7,7 +7,11 @@ edition = "2021"
 name = "rtutor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[workspace]
+members = ["mcp"]
+
 [dependencies]
+rtutor-mcp = { path = "mcp" }
 futures-util = "0.3.34"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 pdf-extract = "0.12.1"

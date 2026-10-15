@@ -53,12 +53,13 @@ The teaching method comes from Amos Blomqvist: his video
 ## For developers
 
 A Rust core (Tauri) with a web UI. One SQLite database holds everything; `~/rtutor` mirrors it as
-files. Agents run in terminal tabs, one per subject, and reach the app through `rtutor --mcp`, a tool
-server that talks to the running app over a local connection.
+files. Agents run in terminal tabs, one per subject, and reach the app through `rtutor-mcp`, a small
+tool server (shipped next to the app; `rtutor --mcp` also works) that talks to the running app over a
+local connection.
 
 ```bash
 npm ci && npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --workspace --manifest-path src-tauri/Cargo.toml
 npx playwright install chromium webkit
 UI_BROWSERS=chromium,webkit npm run test:ui
 npm run tauri dev

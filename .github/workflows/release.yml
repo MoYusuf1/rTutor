@@ -74,14 +74,17 @@ jobs:
       - name: Build frontend for Tauri context
         run: npm run build
       - name: Compile native release tests
-        run: cargo test --release --no-run --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test --workspace --release --no-run --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Rust tests on the native platform
         timeout-minutes: 10
-        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test --workspace --release --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Build installers
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Built app tool server check
-        run: node scripts/smoke-mcp.mjs src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary }}
+        shell: bash
+        run: |
+          node scripts/smoke-mcp.mjs src-tauri/target/${{ matrix.target }}/release/${{ matrix.binary }}
+          node scripts/smoke-mcp.mjs src-tauri/binaries/rtutor-mcp-${{ matrix.target }}${{ endsWith(matrix.binary, '.exe') && '.exe' || '' }}
       - name: Stage installers
         run: python scripts/stage-release.py ${{ matrix.target }}
       - uses: actions/upload-artifact@v4

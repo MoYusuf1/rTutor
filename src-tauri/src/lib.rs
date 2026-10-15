@@ -3,7 +3,7 @@ mod db;
 mod llm;
 pub mod log;
 mod material;
-pub mod mcp;
+pub use rtutor_mcp as mcp;
 mod pty;
 
 use db::{err, exec, Res};

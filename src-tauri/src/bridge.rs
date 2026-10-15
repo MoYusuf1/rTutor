@@ -108,7 +108,7 @@ pub fn focus_running(data_dir: &std::path::Path) -> bool {
 
 /// Where `rtutor --mcp` finds the running app.
 pub fn file(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("bridge.json")
+    rtutor_mcp::bridge_file(data_dir)
 }
 
 fn random() -> String {

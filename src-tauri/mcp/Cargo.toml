@@ -1,0 +1,15 @@
+[package]
+name = "rtutor-mcp"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "rtutor_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rtutor-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0.151"

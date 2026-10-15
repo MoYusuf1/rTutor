@@ -1,5 +1,8 @@
-//! `rtutor --mcp`: the MCP server (JSON-RPC over stdio) a coding agent starts to power rTutor.
-//! It forwards every tool call to the running app over the localhost bridge (see bridge.rs).
+//! `rtutor-mcp`: the MCP server (JSON-RPC over stdio) a coding agent starts to power rTutor. It forwards every
+//! tool call to the running app over the localhost bridge (the app's bridge.rs).
+//!
+//! Its own small program, not the app: an agent's tool server should cost a few megabytes, not load a web view.
+//! The app links this crate too, for the shared tool list and rules, and still answers to `rtutor --mcp`.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -24,7 +27,7 @@ follow what it returns. After every step, call `next` again to wait for the lear
 learner reads the app, not this terminal.\n\n", core_rules!());
 
 fn tools() -> Vec<Value> {
-    let mut tools = crate::llm::tools();
+    let mut tools = lesson_tools();
     tools.insert(0, json!({ "name": "next",
         "description": "Wait for the learner's next message in rTutor (already open) and return it. Call it first, before anything else, and again whenever you have finished responding. The first call also returns how to teach.",
         "input_schema": { "type": "object", "properties": {}, "additionalProperties": false } }));
@@ -64,6 +67,80 @@ pub fn handle(msg: &Value) -> Option<Value> {
     Some(reply(id, result))
 }
 
+/// The lesson tools (the app runs them; the tutor decides when), for API models and agents alike.
+pub fn lesson_tools() -> Vec<Value> {
+    let obj = |props: Value| {
+        let required: Vec<&String> = props.as_object().unwrap().keys().collect();
+        json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
+    };
+    vec![
+        json!({ "name": "write_lesson",
+            "description": "Append one section of lesson content to the lesson canvas (the large left pane). All teaching content goes here: explanations, the plan, dependency maps. Markdown, with $inline$ / $$display$$ LaTeX and ```mermaid diagrams.",
+            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
+        json!({ "name": "quiz",
+            "description": "Ask ONE graded multiple-choice question in the chat pane. The app adds an \"I don't know\" option, grades the answer instantly, reveals your explanation and records a result card on the canvas. The tool result tells you what the learner picked.",
+            "input_schema": obj(json!({
+                "question": { "type": "string" },
+                "options": { "type": "array", "items": { "type": "string" }, "description": "2-3 parallel options with no hints of correctness" },
+                "correct_index": { "type": "integer", "description": "0-based index of the correct option" },
+                "explanation": { "type": "string", "description": "Why the correct option is right and what the tempting wrong ones get wrong. Shown only after the learner answers." }
+            })) }),
+        json!({ "name": "true_false",
+            "description": "Ask ONE graded true-or-false question in the chat pane. The app adds \"I don't know\", grades instantly, reveals your explanation and records a result card on the canvas. Good for quick checks of a single fact or a common misconception.",
+            "input_schema": obj(json!({
+                "statement": { "type": "string", "description": "A claim that is clearly true or clearly false" },
+                "answer": { "type": "boolean", "description": "Whether the statement is true" },
+                "explanation": { "type": "string", "description": "Why. Shown only after the learner answers." }
+            })) }),
+        json!({ "name": "short_answer",
+            "description": "Ask ONE question the learner answers in their own words (a word, a phrase, a translation, a sentence). The app shows their answer next to yours on the canvas; YOU judge it from the tool result (accept equivalent wording and small spelling slips) and say briefly whether it was right. Good for recall and production: harder than recognizing the answer in a list.",
+            "input_schema": obj(json!({
+                "question": { "type": "string" },
+                "answer": { "type": "string", "description": "A model answer" },
+                "explanation": { "type": "string", "description": "Why, or what to notice. Shown after the learner answers." }
+            })) }),
+        json!({ "name": "update_state",
+            "description": "Replace your lesson state: a short Markdown note (under ~300 words) of what the learner reliably knows, their misconceptions and recent misses, the plan's nodes with status, and the next step. Call it after the plan is agreed and after every node's quiz-check. It is what you (or another tutor model) will rely on when older turns are summarized away, so keep it accurate and complete.",
+            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
+        json!({ "name": "ask",
+            "description": "Ask an ungraded multiple-choice question in the chat pane (goals, preferences, what to do next). The learner can also type their own answer.",
+            "input_schema": obj(json!({ "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } })) }),
+        json!({ "name": "search_material",
+            "description": "Search the learner's material (textbooks, slides, transcripts they added) for a topic. Returns the best-matching parts with a snippet each. Only useful when the lesson has material.",
+            "input_schema": obj(json!({ "query": { "type": "string", "description": "A few key words" } })) }),
+        json!({ "name": "read_material",
+            "description": "Read one part of the learner's material, by the material and part numbers from its contents or a search result.",
+            "input_schema": obj(json!({ "material": { "type": "integer" }, "part": { "type": "integer" } })) }),
+        json!({ "name": "subject_notes",
+            "description": "Replace your notes on the whole subject (not just this lesson): which material covers what and where, which sources are reference and which teach in order, and what the learner has shown across lessons. Every later lesson starts from these notes, so it never has to re-read the material to find its way. Under ~500 words.",
+            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
+        json!({ "name": "phase",
+            "description": "Say which phase the lesson is in whenever it changes: probe (finding what the learner knows), plan, teach, or review (testing what was taught). The app offers the learner matching shortcuts.",
+            "input_schema": obj(json!({ "phase": { "type": "string", "enum": ["probe", "plan", "teach", "review"] } })) }),
+    ]
+}
+
+/// Where the running app tells agents how to reach it.
+pub fn bridge_file(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("bridge.json")
+}
+
+/// One line in `<data dir>/mcp.log` (the app keeps rtutor.log to itself, so the two never fight over rotating it).
+fn note(line: impl AsRef<str>) {
+    use std::sync::OnceLock;
+    static OUT: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let out = OUT.get_or_init(|| {
+        let path = data_dir().join("mcp.log");
+        // started over once it passes a megabyte; it holds only connections and cancels
+        let fresh = std::fs::metadata(&path).map_or(false, |m| m.len() > 1024 * 1024);
+        std::fs::OpenOptions::new().create(true).append(!fresh).write(true).truncate(fresh).open(path).ok().map(Mutex::new)
+    });
+    if let Some(Ok(mut f)) = out.as_ref().map(|m| m.lock()) {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let _ = writeln!(f, "{secs} [{}] {}", std::process::id(), line.as_ref());
+    }
+}
+
 /// Where the running app's data directory is, the way Tauri resolves it.
 pub fn data_dir() -> std::path::PathBuf {
     let home = || std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default());
@@ -78,7 +155,7 @@ pub fn data_dir() -> std::path::PathBuf {
 }
 
 fn connect() -> Option<(TcpStream, String)> {
-    let info: Value = serde_json::from_str(&std::fs::read_to_string(crate::bridge::file(&data_dir())).ok()?).ok()?;
+    let info: Value = serde_json::from_str(&std::fs::read_to_string(bridge_file(&data_dir())).ok()?).ok()?;
     let stream = TcpStream::connect(("127.0.0.1", info["port"].as_u64()? as u16)).ok()?;
     Some((stream, info["token"].as_str()?.to_owned()))
 }
@@ -151,8 +228,7 @@ fn forward(agent: Option<u64>, tool: &str, input: &Value, id: &Value, calls: &Ca
 /// Serves until stdin closes (when the agent exits). Tool calls run on their own threads: `next` and
 /// `quiz` wait on the learner, and other calls mustn't queue behind them.
 pub fn serve() {
-    crate::log::init(&data_dir());
-    let stdout = Arc::new(Mutex::new(std::io::stdout()));
+        let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let agent = Arc::new(Mutex::new(None::<u64>));
     let calls: Calls = Arc::default();
     let send = |out: &Mutex<std::io::Stdout>, v: Value| {
@@ -165,14 +241,14 @@ pub fn serve() {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         if msg["method"] == "initialize" && !std::mem::replace(&mut started, true) {
             let name = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("agent").to_owned();
-            crate::log::note(format!("mcp   started by {name}"));
+            note(format!("mcp   started by {name}"));
             let agent = agent.clone();
             std::thread::spawn(move || presence(name, agent));
         }
         if msg["method"] == "notifications/cancelled" {
             let id = msg["params"]["requestId"].to_string();
             if let Some(stream) = calls.lock().unwrap().remove(&id) {
-                crate::log::note(format!("mcp   the agent cancelled call {id}"));
+                note(format!("mcp   the agent cancelled call {id}"));
                 let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         }

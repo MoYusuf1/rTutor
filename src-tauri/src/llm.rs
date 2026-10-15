@@ -68,57 +68,9 @@ pub(crate) fn api_cost(u: &Usage) -> Option<f64> {
     Some((input * i + u.output as f64 * o) / 1e6)
 }
 
-/// The tools the app runs in the UI; the model only decides when to call them.
+/// The tools the app runs in the UI; the model only decides when to call them. Shared with `rtutor-mcp`.
 pub fn tools() -> Vec<Value> {
-    let obj = |props: Value| {
-        let required: Vec<&String> = props.as_object().unwrap().keys().collect();
-        json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
-    };
-    vec![
-        json!({ "name": "write_lesson",
-            "description": "Append one section of lesson content to the lesson canvas (the large left pane). All teaching content goes here: explanations, the plan, dependency maps. Markdown, with $inline$ / $$display$$ LaTeX and ```mermaid diagrams.",
-            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
-        json!({ "name": "quiz",
-            "description": "Ask ONE graded multiple-choice question in the chat pane. The app adds an \"I don't know\" option, grades the answer instantly, reveals your explanation and records a result card on the canvas. The tool result tells you what the learner picked.",
-            "input_schema": obj(json!({
-                "question": { "type": "string" },
-                "options": { "type": "array", "items": { "type": "string" }, "description": "2-3 parallel options with no hints of correctness" },
-                "correct_index": { "type": "integer", "description": "0-based index of the correct option" },
-                "explanation": { "type": "string", "description": "Why the correct option is right and what the tempting wrong ones get wrong. Shown only after the learner answers." }
-            })) }),
-        json!({ "name": "true_false",
-            "description": "Ask ONE graded true-or-false question in the chat pane. The app adds \"I don't know\", grades instantly, reveals your explanation and records a result card on the canvas. Good for quick checks of a single fact or a common misconception.",
-            "input_schema": obj(json!({
-                "statement": { "type": "string", "description": "A claim that is clearly true or clearly false" },
-                "answer": { "type": "boolean", "description": "Whether the statement is true" },
-                "explanation": { "type": "string", "description": "Why. Shown only after the learner answers." }
-            })) }),
-        json!({ "name": "short_answer",
-            "description": "Ask ONE question the learner answers in their own words (a word, a phrase, a translation, a sentence). The app shows their answer next to yours on the canvas; YOU judge it from the tool result (accept equivalent wording and small spelling slips) and say briefly whether it was right. Good for recall and production: harder than recognizing the answer in a list.",
-            "input_schema": obj(json!({
-                "question": { "type": "string" },
-                "answer": { "type": "string", "description": "A model answer" },
-                "explanation": { "type": "string", "description": "Why, or what to notice. Shown after the learner answers." }
-            })) }),
-        json!({ "name": "update_state",
-            "description": "Replace your lesson state: a short Markdown note (under ~300 words) of what the learner reliably knows, their misconceptions and recent misses, the plan's nodes with status, and the next step. Call it after the plan is agreed and after every node's quiz-check. It is what you (or another tutor model) will rely on when older turns are summarized away, so keep it accurate and complete.",
-            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
-        json!({ "name": "ask",
-            "description": "Ask an ungraded multiple-choice question in the chat pane (goals, preferences, what to do next). The learner can also type their own answer.",
-            "input_schema": obj(json!({ "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } })) }),
-        json!({ "name": "search_material",
-            "description": "Search the learner's material (textbooks, slides, transcripts they added) for a topic. Returns the best-matching parts with a snippet each. Only useful when the lesson has material.",
-            "input_schema": obj(json!({ "query": { "type": "string", "description": "A few key words" } })) }),
-        json!({ "name": "read_material",
-            "description": "Read one part of the learner's material, by the material and part numbers from its contents or a search result.",
-            "input_schema": obj(json!({ "material": { "type": "integer" }, "part": { "type": "integer" } })) }),
-        json!({ "name": "subject_notes",
-            "description": "Replace your notes on the whole subject (not just this lesson): which material covers what and where, which sources are reference and which teach in order, and what the learner has shown across lessons. Every later lesson starts from these notes, so it never has to re-read the material to find its way. Under ~500 words.",
-            "input_schema": obj(json!({ "markdown": { "type": "string" } })) }),
-        json!({ "name": "phase",
-            "description": "Say which phase the lesson is in whenever it changes: probe (finding what the learner knows), plan, teach, or review (testing what was taught). The app offers the learner matching shortcuts.",
-            "input_schema": obj(json!({ "phase": { "type": "string", "enum": ["probe", "plan", "teach", "review"] } })) }),
-    ]
+    rtutor_mcp::lesson_tools()
 }
 
 pub async fn chat(http: &reqwest::Client, p: &Provider, key: &str, system: &str, messages: &[Value], ch: &Channel<Event>) -> Result<Reply, String> {
